@@ -166,7 +166,7 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
             // Solid bars get their own strip at the bottom and right instead of
             // floating over the nodes and showing up only on hover.
             ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-            let last_view_id = ui.id().with("canvas_last_view");
+            let last_view_id = ui.scope_id().with("canvas_last_view");
             let mut scroll_area = egui::ScrollArea::both()
                 .id_salt("canvas")
                 .auto_shrink(false)
@@ -185,7 +185,7 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
                     last_view_id,
                     LastView {
                         scale: app.scale,
-                        offset: output.state.offset,
+                        offset: output.state.clamped_offset(),
                         viewport: output.inner_rect.size(),
                     },
                 );

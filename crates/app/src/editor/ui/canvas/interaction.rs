@@ -139,7 +139,7 @@ pub(super) fn handle_node_interactions(
         // stable when nodes are added, deleted or reordered.
         let body_response = ui.interact(
             view.rect(node.rect()),
-            ui.id().with(("canvas_node", node.id)),
+            ui.scope_id().with(("canvas_node", node.id)),
             egui::Sense::click_and_drag(),
         );
 
@@ -148,7 +148,7 @@ pub(super) fn handle_node_interactions(
                 .map(|index| {
                     ui.interact(
                         socket_rect(node, side, index, view),
-                        ui.id().with(("canvas_socket", node.id, side, index)),
+                        ui.scope_id().with(("canvas_socket", node.id, side, index)),
                         egui::Sense::click(),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -160,7 +160,7 @@ pub(super) fn handle_node_interactions(
         let delete_response = ui
             .interact(
                 view.rect(delete_button_rect(node)),
-                ui.id().with(("canvas_node_delete", node.id)),
+                ui.scope_id().with(("canvas_node_delete", node.id)),
                 egui::Sense::click(),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)

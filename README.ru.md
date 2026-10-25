@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/VanoSpalevoy/v-signal-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/VanoSpalevoy/v-signal-forge/actions/workflows/ci.yml)
 ![Rust 1.99.1](https://img.shields.io/badge/rust-1.99.1-orange?logo=rust)
-![egui 0.36](https://img.shields.io/badge/egui-0.36-blue)
+![egui 0.37](https://img.shields.io/badge/egui-0.37-blue)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
 
 [English](README.md) · **Русский**

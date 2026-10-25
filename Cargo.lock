@@ -3384,6 +3384,9 @@ dependencies = [
 [[package]]
 name = "v-signal-nodes-core"
 version = "0.0.1"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "v-signal-nodes-plugin-api"

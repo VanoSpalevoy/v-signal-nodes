@@ -14,7 +14,7 @@
 use eframe::egui;
 
 use super::{TEXT_DIM, caption, panel_frame};
-use crate::editor::{MAX_NODE_COUNT, Text, VSignalNodesApp};
+use crate::editor::{Language, MAX_NODE_COUNT, SocketRef, Text, VSignalNodesApp};
 
 /// Height after which the connection list scrolls instead of growing the panel.
 const CONNECTIONS_MAX_HEIGHT: f32 = 120.0;
@@ -44,29 +44,21 @@ pub(super) fn show(app: &VSignalNodesApp, ui: &mut egui::Ui) {
             }
             if let Some(source) = app.pending_source {
                 ui.label(format!(
-                    "{} {} {} {}",
+                    "{} {}",
                     app.language.text(Text::SelectedSourceSocket),
-                    source.node_id,
-                    source.side.label(app.language),
-                    source.index + 1,
+                    socket_text(source, app.language),
                 ));
             } else if !app.node_limit_reached && !app.connection_refused {
                 ui.label(app.language.text(Text::Ready));
             }
-            let mut connections: Vec<_> = app.connections.iter().collect();
-            connections.sort_by_key(|(to, from)| (from.node_id, from.index, to.node_id, to.index));
             egui::ScrollArea::vertical()
                 .max_height(CONNECTIONS_MAX_HEIGHT)
                 .show(ui, |ui| {
-                    for (to, from) in connections {
+                    for (from, to) in app.sorted_connections() {
                         let line = format!(
-                            "{} {} {} -> {} {} {}",
-                            from.node_id,
-                            from.side.label(app.language),
-                            from.index + 1,
-                            to.node_id,
-                            to.side.label(app.language),
-                            to.index + 1,
+                            "{} -> {}",
+                            socket_text(from, app.language),
+                            socket_text(to, app.language),
                         );
                         ui.label(
                             egui::RichText::new(line)
@@ -77,4 +69,14 @@ pub(super) fn show(app: &VSignalNodesApp, ui: &mut egui::Ui) {
                     }
                 });
         });
+}
+
+/// `socket` as `node Side n`, e.g. `3 Output 1` (socket number 1-based).
+fn socket_text(socket: SocketRef, language: Language) -> String {
+    format!(
+        "{} {} {}",
+        socket.node_id,
+        socket.side.label(language),
+        socket.index + 1
+    )
 }

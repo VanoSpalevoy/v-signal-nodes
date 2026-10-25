@@ -32,6 +32,8 @@ pub struct PluginHost {
     providers: HashMap<String, Box<dyn NodeProvider>>,
     /// Names of loaded plugins, in load order.
     plugins: Vec<String>,
+    /// Index into `plugins` of the plugin that registered each node type id.
+    owners: HashMap<String, usize>,
 }
 
 /// [`Registrar`] that only collects providers, so a plugin is registered all or
@@ -85,6 +87,7 @@ impl PluginHost {
         }
 
         for (spec, provider) in entries {
+            self.owners.insert(spec.type_id.clone(), self.plugins.len());
             self.providers.insert(spec.type_id.clone(), provider);
             self.factory.register(spec)?;
         }
@@ -108,6 +111,13 @@ impl PluginHost {
     /// Names of the loaded plugins, in load order.
     pub fn plugins(&self) -> &[String] {
         &self.plugins
+    }
+
+    /// Name of the plugin that registered node type `type_id`, if it is loaded.
+    pub fn plugin_of(&self, type_id: &str) -> Option<&str> {
+        self.owners
+            .get(type_id)
+            .map(|&index| self.plugins[index].as_str())
     }
 
     /// All available node types, sorted by type id.
@@ -232,6 +242,8 @@ mod tests {
         assert_eq!(built.node.type_id, "test.gain");
         check_life_cycle(built.processor.as_mut());
         assert_eq!(host.plugins(), ["test"]);
+        assert_eq!(host.plugin_of("test.gain"), Some("test"));
+        assert_eq!(host.plugin_of("test.missing"), None);
     }
 
     #[test]

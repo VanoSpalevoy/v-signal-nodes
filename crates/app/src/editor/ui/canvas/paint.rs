@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use super::{CONNECTION_MIN_HANDLE, HEADER_HEIGHT, Hovered, View, delete_button_rect, drop_rect};
 use crate::editor::ui::routing::{self, Route};
 use crate::editor::ui::{ACCENT, DANGER, NodeKind, PANEL_BG, TEXT, TEXT_DIM, node_color};
-use crate::editor::{NodeWidget, SocketKind, SocketRef, VSignalNodesApp};
+use crate::editor::{NodeWidget, SocketKind, VSignalNodesApp};
 
 /// Corner radius of a node.
 const NODE_ROUNDING: f32 = 8.0;
@@ -67,15 +67,6 @@ pub(super) fn paint(
     paint_palette_preview(app, ui.ctx(), painter, view, pointer);
 }
 
-fn paint_curve(painter: &egui::Painter, points: [egui::Pos2; 4], stroke: egui::Stroke) {
-    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-        points,
-        false,
-        egui::Color32::TRANSPARENT,
-        stroke,
-    ));
-}
-
 /// Draws each connection along its route: the plain curve when nothing is in the
 /// way, otherwise the orthogonal path around the nodes with rounded corners. The
 /// line fades from the source node's kind color to the target node's.
@@ -92,7 +83,7 @@ fn paint_connections(
     let colors: HashMap<usize, egui::Color32> = app
         .nodes
         .iter()
-        .map(|node| (node.id, node_color(&node.config.kind)))
+        .map(|node| (node.id, node_color(node.kind())))
         .collect();
     let kind_color = |node_id: usize| colors.get(&node_id).copied().unwrap_or(ACCENT);
     let width = view.len(CONNECTION_WIDTH);
@@ -256,13 +247,18 @@ fn paint_pending_connection(
     let (Some(source), Some(pointer)) = (app.pending_source, pointer) else {
         return;
     };
-    let Some(node) = app.nodes.iter().find(|node| node.id == source.node_id) else {
+    let Some(node) = app.node(source.node_id) else {
         return;
     };
     let start = view.pos(node.socket_pos(source.side, source.index));
     let stroke = egui::Stroke::new(view.len(CONNECTION_WIDTH), ACCENT.gamma_multiply(0.5));
     let curve = routing::bezier(start, pointer, view.len(CONNECTION_MIN_HANDLE));
-    paint_curve(painter, curve, stroke);
+    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+        curve,
+        false,
+        egui::Color32::TRANSPARENT,
+        stroke,
+    ));
 }
 
 /// Draws a dot grid over the visible part of the canvas, aligned to canvas
@@ -294,9 +290,8 @@ fn paint_grid(painter: &egui::Painter, view: View, viewport: egui::Rect) {
 /// the zoom.
 fn paint_nodes(app: &VSignalNodesApp, painter: &egui::Painter, view: View, hovered: &Hovered) {
     let language = app.language;
-    let font = |size: f32| egui::FontId::proportional(view.len(size));
     for node in &app.nodes {
-        let color = node_color(&node.config.kind);
+        let color = node_color(node.kind());
         let rect = view.rect(node.rect());
         let rounding = view.len(NODE_ROUNDING);
 
@@ -329,23 +324,23 @@ fn paint_nodes(app: &VSignalNodesApp, painter: &egui::Painter, view: View, hover
         let title_rect = painter.text(
             egui::pos2(rect.left() + view.len(TITLE_PADDING), header.center().y),
             egui::Align2::LEFT_CENTER,
-            node.config.kind.label(language),
-            font(13.0),
+            node.kind().label(language),
+            view.font(13.0),
             TEXT,
         );
         painter.text(
             egui::pos2(title_rect.right() + view.len(5.0), header.center().y),
             egui::Align2::LEFT_CENTER,
             format!("#{}", node.id),
-            font(11.0),
+            view.font(11.0),
             TEXT_DIM,
         );
-        for (index, param) in node.config.content.iter().enumerate() {
+        for (index, param) in node.config.params.iter().enumerate() {
             painter.text(
                 view.pos(node.param_pos(index)),
                 egui::Align2::CENTER_CENTER,
                 node.config.param_label(param, language),
-                font(12.0),
+                view.font(12.0),
                 TEXT_DIM,
             );
         }
@@ -395,49 +390,40 @@ fn paint_sockets(
     view: View,
     hovered: &Hovered,
 ) {
-    let color = node_color(&node.config.kind);
-    for (side, sockets) in [
-        (SocketKind::Input, &node.config.inputs),
-        (SocketKind::Output, &node.config.outputs),
-    ] {
-        for index in 0..sockets.len() {
-            let socket = SocketRef {
-                node_id: node.id,
-                side,
-                index,
-            };
-            let pos = view.pos(node.socket_pos(side, index));
-            let (radius, fill) = if hovered.socket == Some(socket) {
-                (view.len(SOCKET_RADIUS + SOCKET_HOVER_GROW), ACCENT)
-            } else {
-                (view.len(SOCKET_RADIUS), color)
-            };
-            painter.circle(
+    let color = node_color(node.kind());
+    for socket in node.sockets() {
+        let pos = view.pos(node.socket_pos(socket.side, socket.index));
+        let (radius, fill) = if hovered.socket == Some(socket) {
+            (view.len(SOCKET_RADIUS + SOCKET_HOVER_GROW), ACCENT)
+        } else {
+            (view.len(SOCKET_RADIUS), color)
+        };
+        painter.circle(
+            pos,
+            radius,
+            fill,
+            egui::Stroke::new(view.len(2.0), PANEL_BG),
+        );
+        if app.pending_source == Some(socket) {
+            painter.circle_stroke(
                 pos,
-                radius,
-                fill,
-                egui::Stroke::new(view.len(2.0), PANEL_BG),
-            );
-            if app.pending_source == Some(socket) {
-                painter.circle_stroke(
-                    pos,
-                    radius + view.len(4.0),
-                    egui::Stroke::new(view.len(1.5), ACCENT),
-                );
-            }
-
-            let (align, direction) = match side {
-                SocketKind::Input => (egui::Align2::LEFT_CENTER, 1.0),
-                SocketKind::Output => (egui::Align2::RIGHT_CENTER, -1.0),
-            };
-            painter.text(
-                pos + egui::vec2(direction * view.len(SOCKET_LABEL_GAP), 0.0),
-                align,
-                node.config.socket_label(side, index, app.language),
-                egui::FontId::proportional(view.len(11.0)),
-                TEXT_DIM,
+                radius + view.len(4.0),
+                egui::Stroke::new(view.len(1.5), ACCENT),
             );
         }
+
+        let (align, direction) = match socket.side {
+            SocketKind::Input => (egui::Align2::LEFT_CENTER, 1.0),
+            SocketKind::Output => (egui::Align2::RIGHT_CENTER, -1.0),
+        };
+        painter.text(
+            pos + egui::vec2(direction * view.len(SOCKET_LABEL_GAP), 0.0),
+            align,
+            node.config
+                .socket_label(socket.side, socket.index, app.language),
+            view.font(11.0),
+            TEXT_DIM,
+        );
     }
 }
 
@@ -466,9 +452,9 @@ fn paint_ghost(
 /// or the new places of the neighbors it pushes aside.
 fn paint_drop_preview(app: &VSignalNodesApp, painter: &egui::Painter, view: View) {
     for (node_id, pos) in app.drop_moves() {
-        if let Some(node) = app.nodes.iter().find(|node| node.id == node_id) {
+        if let Some(node) = app.node(node_id) {
             let rect = egui::Rect::from_min_size(pos, node.rect().size());
-            paint_ghost(painter, view, rect, node_color(&node.config.kind));
+            paint_ghost(painter, view, rect, node_color(node.kind()));
         }
     }
 }
@@ -490,7 +476,7 @@ fn paint_palette_preview(
         preview_rect.center(),
         egui::Align2::CENTER_CENTER,
         kind.label(app.language),
-        egui::FontId::proportional(view.len(14.0)),
+        view.font(14.0),
         TEXT,
     );
 }

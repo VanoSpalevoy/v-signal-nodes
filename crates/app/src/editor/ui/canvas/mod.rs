@@ -54,11 +54,12 @@
 //! | drop a palette button on the canvas     | add a node centered on the pointer              |
 //! | click a palette button                  | add a node in the middle of the visible area    |
 //!
-//! Clicking an input always clears the selection. The connection itself goes
-//! through `VSignalNodesApp::connect`, which refuses edges that would create a cycle
-//! (including a node feeding itself) and flags that for the debug panel.
-//! Disconnecting goes through `VSignalNodesApp::disconnect_input` / `disconnect_output`,
-//! moving through `VSignalNodesApp::begin_drag` / `drag_to` / `end_drag` / `cancel_drag`.
+//! Clicking an input always clears the selection. Every effect is a
+//! `VSignalNodesApp` call: selecting goes through `select_source` / `clear_selection`,
+//! connecting through `connect_pending` (→ `connect`, which refuses edges that
+//! would create a cycle, including a node feeding itself, and flags that for the
+//! debug panel), disconnecting through `disconnect_input` / `disconnect_output`,
+//! moving through `begin_drag` / `drag_to` / `end_drag` / `cancel_drag`.
 //!
 //! Feedback: while a node is dragged, ghosts show where nodes will be once it is
 //! dropped; the pending source gets an accent ring and a curve that follows the
@@ -132,6 +133,11 @@ impl View {
 
     fn to_canvas(self, screen: egui::Pos2) -> egui::Pos2 {
         ((screen.to_vec2() - self.origin) / self.scale).to_pos2()
+    }
+
+    /// The proportional font of `size` canvas units.
+    fn font(self, size: f32) -> egui::FontId {
+        egui::FontId::proportional(self.len(size))
     }
 }
 
@@ -211,7 +217,7 @@ fn show_content(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
 
     let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
     if background.clicked() || escape {
-        app.pending_source = None;
+        app.clear_selection();
     }
     if escape {
         app.cancel_drag();
@@ -237,15 +243,19 @@ fn content_size(nodes: &[NodeWidget], scale: f32, viewport: egui::Vec2) -> egui:
     (extent * scale).max(viewport)
 }
 
-/// Canvas rect of a node of `kind` dropped at screen `pointer`: centered on it, kept off negative coordinates.
-///
-/// Moved to the nearest free spot if that would overlap a node, exactly as
-/// `add_node_at` will place it, so the preview shows the real landing spot.
+/// Top-left corner (canvas coordinates) that centers a node of `kind` on `center`:
+/// where palette clicks and drops ask `add_node_at` to put a node.
+fn centered_on(kind: &NodeKind, center: egui::Pos2) -> egui::Pos2 {
+    center - NodeConfig::for_kind(kind).size() * 0.5
+}
+
+/// Canvas rect of a node of `kind` dropped at screen `pointer`: centered on it, or
+/// at the nearest free spot, exactly as `add_node_at` will place it, so the
+/// preview shows the real landing spot.
 fn drop_rect(kind: &NodeKind, pointer: egui::Pos2, view: View, nodes: &[NodeWidget]) -> egui::Rect {
     let config = NodeConfig::for_kind(kind);
-    let size = config.size();
-    let pos = place_new_node(nodes, &config, view.to_canvas(pointer) - size * 0.5);
-    egui::Rect::from_min_size(pos, size)
+    let pos = place_new_node(nodes, &config, centered_on(kind, view.to_canvas(pointer)));
+    egui::Rect::from_min_size(pos, config.size())
 }
 
 /// A socket's hit area on screen: a [`SOCKET_HIT_SIZE`] square centered on the

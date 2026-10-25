@@ -150,7 +150,7 @@ impl RouteCache {
             .iter()
             .filter_map(|(to, from)| Some((*to, *from, socket_pos(*from)?, socket_pos(*to)?)))
             .collect();
-        ends.sort_by_key(|(to, from, ..)| (from.node_id, from.index, to.node_id, to.index));
+        ends.sort_by_key(|&(to, from, ..)| (from, to));
         let stubs: Vec<_> = ends
             .iter()
             .flat_map(|(_, from, start, end)| {
@@ -179,8 +179,9 @@ impl RouteCache {
             for rect in &obstacles {
                 hash_points(&mut hasher, &[rect.min, rect.max]);
             }
-            // Wires from the same output are left out: fanning out may share a stretch.
+            // Wires from the same output are siblings: fanning out may share a stretch.
             let mut wires: Vec<&[egui::Pos2]> = Vec::new();
+            let mut siblings: Vec<&[egui::Pos2]> = Vec::new();
             for (_, stub) in stubs.iter().filter(|(source, stub)| {
                 *source != from && egui::Rect::from_two_pos(stub[0], stub[1]).intersects(area)
             }) {
@@ -189,10 +190,16 @@ impl RouteCache {
             }
             for earlier in routed
                 .iter()
-                .filter(|earlier| earlier.from != from && earlier.bounds.intersects(area))
+                .filter(|earlier| earlier.bounds.intersects(area))
             {
+                // Distinguishes a sibling from a wire of the same shape.
+                (earlier.from == from).hash(&mut hasher);
                 earlier.shape.hash(&mut hasher);
-                wires.push(&earlier.polyline);
+                if earlier.from == from {
+                    siblings.push(&earlier.polyline);
+                } else {
+                    wires.push(&earlier.polyline);
+                }
             }
             let key = hasher.finish();
 
@@ -223,8 +230,14 @@ impl RouteCache {
                 }
                 _ => {
                     update.recomputed += 1;
-                    let route =
-                        routing::route(start, end, &obstacles, &wires, CONNECTION_MIN_HANDLE);
+                    let route = routing::route(
+                        start,
+                        end,
+                        &obstacles,
+                        &wires,
+                        &siblings,
+                        CONNECTION_MIN_HANDLE,
+                    );
                     RoutedConnection::new((to, from), [start, end], key, route, false)
                 }
             };
@@ -315,7 +328,7 @@ impl Hasher for KeyHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::{NodeConfig, SocketKind, ui::std_kind};
+    use crate::editor::{NodeConfig, ui::std_kind};
     use v_signal_nodes_plugin_std::{GAIN, SINK, SOURCE};
 
     fn node(id: usize, type_id: &str, x: f32, y: f32) -> NodeWidget {
@@ -324,14 +337,6 @@ mod tests {
             NodeConfig::for_kind(&std_kind(type_id)),
             egui::pos2(x, y),
         )
-    }
-
-    fn socket(node_id: usize, side: SocketKind, index: usize) -> SocketRef {
-        SocketRef {
-            node_id,
-            side,
-            index,
-        }
     }
 
     /// Source 0 feeding sink 2 around gain 1 in the way, and source 3 feeding the gain.
@@ -343,14 +348,8 @@ mod tests {
             node(3, SOURCE, 0.0, 150.0),
         ];
         let connections = HashMap::from([
-            (
-                socket(2, SocketKind::Input, 0),
-                socket(0, SocketKind::Output, 0),
-            ),
-            (
-                socket(1, SocketKind::Input, 0),
-                socket(3, SocketKind::Output, 0),
-            ),
+            (SocketRef::input(2, 0), SocketRef::output(0, 0)),
+            (SocketRef::input(1, 0), SocketRef::output(3, 0)),
         ]);
         (nodes, connections)
     }
@@ -466,10 +465,10 @@ mod tests {
         let mut cache = RouteCache::default();
         cache.update(&nodes, &connections, Duration::MAX);
 
-        connections.remove(&socket(2, SocketKind::Input, 0));
+        connections.remove(&SocketRef::input(2, 0));
         cache.update(&nodes, &connections, Duration::MAX);
 
         assert_eq!(cache.routes().len(), 1);
-        assert_eq!(cache.routes()[0].to, socket(1, SocketKind::Input, 0));
+        assert_eq!(cache.routes()[0].to, SocketRef::input(1, 0));
     }
 }

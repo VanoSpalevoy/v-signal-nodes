@@ -12,8 +12,8 @@
 
 use eframe::egui;
 
-use super::{Language, caption, panel_frame};
-use crate::editor::{Text, VSignalNodesApp};
+use super::{caption, panel_frame};
+use crate::editor::{Language, Text, VSignalNodesApp};
 
 /// Grid size used by Snap to grid, in canvas units.
 const GRID_STEP: f32 = 50.0;

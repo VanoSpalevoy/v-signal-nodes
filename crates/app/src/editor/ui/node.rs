@@ -37,9 +37,9 @@
 use std::sync::Arc;
 
 use eframe::egui;
-use v_signal_nodes_core::{Node, NodeSocket, NodeSpec, ParamKind, ParamSpec, TextKey};
+use v_signal_nodes_core::{Node, NodeSpec, ParamSpec, ParamValue, TextKey};
 
-use super::super::localization::{Language, Text};
+use crate::editor::{Language, Text};
 
 /// Width of every node.
 const NODE_WIDTH: f32 = 160.0;
@@ -72,7 +72,7 @@ impl NodeKind {
 }
 
 /// Side of a node a socket is on. Inputs are on the left edge, outputs on the right.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(in crate::editor) enum SocketKind {
     Input,
     Output,
@@ -90,8 +90,9 @@ impl SocketKind {
 
 /// Address of one socket: node, side and row.
 ///
-/// Used as both key and value of `VSignalNodesApp::connections`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Used as both key and value of `VSignalNodesApp::connections`. Ordered by node,
+/// side, then index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(in crate::editor) struct SocketRef {
     /// ID of the node ([`NodeWidget::id`]).
     pub(in crate::editor) node_id: usize,
@@ -100,26 +101,22 @@ pub(in crate::editor) struct SocketRef {
     pub(in crate::editor) index: usize,
 }
 
-/// Value of a node parameter, as shown.
-#[derive(Clone, Debug)]
-pub(in crate::editor) enum ParamValue {
-    /// A choice option, by index; its label comes from the spec.
-    Option(usize),
-    /// A number, shown with one decimal place.
-    Number(f32),
-    /// A toggle, shown as "on"/"off" in the UI language.
-    Toggle(bool),
-}
+impl SocketRef {
+    /// Input socket `index` of node `node_id`.
+    pub(in crate::editor) fn input(node_id: usize, index: usize) -> Self {
+        Self {
+            node_id,
+            side: SocketKind::Input,
+            index,
+        }
+    }
 
-impl ParamValue {
-    /// How `value` of the parameter `spec` is shown.
-    fn from_core(spec: &ParamSpec, value: v_signal_nodes_core::ParamValue) -> Self {
-        use v_signal_nodes_core::ParamValue as Core;
-        match (&spec.kind, value) {
-            (ParamKind::Choice { .. }, Core::Choice(index)) => Self::Option(index),
-            (_, Core::Choice(index)) => Self::Number(index as f32),
-            (_, Core::Number(value)) => Self::Number(value),
-            (_, Core::Toggle(on)) => Self::Toggle(on),
+    /// Output socket `index` of node `node_id`.
+    pub(in crate::editor) fn output(node_id: usize, index: usize) -> Self {
+        Self {
+            node_id,
+            side: SocketKind::Output,
+            index,
         }
     }
 }
@@ -128,23 +125,24 @@ impl ParamValue {
 /// Display only for now: parameters can't be edited yet.
 #[derive(Clone, Debug)]
 pub(in crate::editor) struct NodeParam {
-    /// The parameter's id in the spec; its name comes from the spec.
+    /// The parameter's id in the spec; its name (and a choice's option labels)
+    /// come from the spec.
     id: String,
     value: ParamValue,
 }
 
-/// What a node contains: its kind, socket labels and parameters.
+/// What a node contains: its kind, socket counts and parameters.
 ///
 /// Text is looked up in the spec when shown, so nodes follow language changes.
 #[derive(Clone, Debug)]
 pub(in crate::editor) struct NodeConfig {
     pub(super) kind: NodeKind,
-    /// Input socket labels, top to bottom; the position is the socket index.
-    pub(super) inputs: Vec<String>,
-    /// Output socket labels, top to bottom; the position is the socket index.
-    pub(super) outputs: Vec<String>,
-    /// Parameters, top to bottom.
-    pub(super) content: Vec<NodeParam>,
+    /// Number of input sockets.
+    inputs: usize,
+    /// Number of output sockets.
+    outputs: usize,
+    /// Parameters, top to bottom, in spec order.
+    pub(super) params: Vec<NodeParam>,
 }
 
 impl NodeConfig {
@@ -154,39 +152,37 @@ impl NodeConfig {
     pub(in crate::editor) fn for_kind(kind: &NodeKind) -> Self {
         let spec = kind.spec();
         let defaults: Vec<_> = spec.params.iter().map(ParamSpec::default_value).collect();
-        Self::from_parts(kind.clone(), &spec.inputs, &spec.outputs, &defaults)
+        Self::from_parts(
+            kind.clone(),
+            spec.inputs.len(),
+            spec.outputs.len(),
+            &defaults,
+        )
     }
 
     /// The config of `node`, built by `core` from `kind`'s spec: its sockets and
     /// current parameter values.
     pub(in crate::editor) fn from_node(kind: NodeKind, node: &Node) -> Self {
         debug_assert_eq!(kind.spec().type_id, node.type_id);
-        Self::from_parts(kind, &node.inputs, &node.outputs, &node.params)
+        Self::from_parts(kind, node.inputs.len(), node.outputs.len(), &node.params)
     }
 
-    fn from_parts(
-        kind: NodeKind,
-        inputs: &[NodeSocket],
-        outputs: &[NodeSocket],
-        params: &[v_signal_nodes_core::ParamValue],
-    ) -> Self {
-        let labels =
-            |sockets: &[NodeSocket]| sockets.iter().map(|socket| socket.name.clone()).collect();
-        let content = kind
+    fn from_parts(kind: NodeKind, inputs: usize, outputs: usize, values: &[ParamValue]) -> Self {
+        let params = kind
             .spec()
             .params
             .iter()
-            .zip(params)
+            .zip(values)
             .map(|(param, &value)| NodeParam {
                 id: param.id.clone(),
-                value: ParamValue::from_core(param, value),
+                value,
             })
             .collect();
         Self {
-            inputs: labels(inputs),
-            outputs: labels(outputs),
-            content,
             kind,
+            inputs,
+            outputs,
+            params,
         }
     }
 
@@ -209,22 +205,25 @@ impl NodeConfig {
     /// "Режим: стерео".
     pub(super) fn param_label(&self, param: &NodeParam, language: Language) -> String {
         let name = self.text(&TextKey::param(&param.id), language);
-        match &param.value {
-            ParamValue::Option(index) => format!(
-                "{name}: {}",
-                self.text(&TextKey::option(&param.id, *index), language)
-            ),
-            ParamValue::Number(value) => format!("{name}: {value:.1}"),
-            ParamValue::Toggle(on) => {
-                let state = if *on { Text::On } else { Text::Off };
-                format!("{name}: {}", language.text(state))
-            }
+        let value = match param.value {
+            ParamValue::Choice(index) => self.text(&TextKey::option(&param.id, index), language),
+            ParamValue::Number(value) => return format!("{name}: {value:.1}"),
+            ParamValue::Toggle(on) => language.text(if on { Text::On } else { Text::Off }),
+        };
+        format!("{name}: {value}")
+    }
+
+    /// Number of sockets on `side`.
+    pub(in crate::editor) fn socket_count(&self, side: SocketKind) -> usize {
+        match side {
+            SocketKind::Input => self.inputs,
+            SocketKind::Output => self.outputs,
         }
     }
 
     /// Number of socket rows: the longer of the input and output columns.
     fn socket_rows(&self) -> usize {
-        self.inputs.len().max(self.outputs.len())
+        self.inputs.max(self.outputs)
     }
 
     /// Size of a node with this config: [`NODE_WIDTH`] wide, tall enough for the
@@ -233,7 +232,7 @@ impl NodeConfig {
     /// The single source of node size: the node itself, the drop preview and the
     /// canvas extent all use it.
     pub(super) fn size(&self) -> egui::Vec2 {
-        let row_count = (self.socket_rows() + self.content.len()).max(1);
+        let row_count = (self.socket_rows() + self.params.len()).max(1);
         egui::vec2(
             NODE_WIDTH,
             MIN_NODE_HEIGHT.max(CONTENT_TOP + ROW_HEIGHT * row_count as f32 + 8.0),
@@ -262,12 +261,35 @@ impl NodeWidget {
         egui::Rect::from_min_size(self.pos, self.config.size())
     }
 
-    /// Socket labels on `side`, top to bottom.
-    pub(super) fn sockets(&self, side: SocketKind) -> &[String] {
-        match side {
-            SocketKind::Input => &self.config.inputs,
-            SocketKind::Output => &self.config.outputs,
-        }
+    /// The node's type.
+    pub(in crate::editor) fn kind(&self) -> &NodeKind {
+        &self.config.kind
+    }
+
+    /// Current parameter values by parameter id, in spec order.
+    pub(in crate::editor) fn param_values(&self) -> impl Iterator<Item = (&str, ParamValue)> {
+        self.config
+            .params
+            .iter()
+            .map(|param| (param.id.as_str(), param.value))
+    }
+
+    /// Every socket of the node: inputs top to bottom, then outputs.
+    pub(in crate::editor) fn sockets(&self) -> impl Iterator<Item = SocketRef> {
+        let id = self.id;
+        let side = |side: SocketKind| {
+            (0..self.config.socket_count(side)).map(move |index| SocketRef {
+                node_id: id,
+                side,
+                index,
+            })
+        };
+        side(SocketKind::Input).chain(side(SocketKind::Output))
+    }
+
+    /// Whether the node has `socket` (its node ID is not checked).
+    pub(in crate::editor) fn has_socket(&self, socket: SocketRef) -> bool {
+        socket.index < self.config.socket_count(socket.side)
     }
 
     /// Center of a socket in canvas coordinates: on the left (input) or right
@@ -276,7 +298,7 @@ impl NodeWidget {
     /// `index` must be a valid socket on `side` (checked in debug builds).
     pub(super) fn socket_pos(&self, side: SocketKind, index: usize) -> egui::Pos2 {
         debug_assert!(
-            index < self.sockets(side).len(),
+            index < self.config.socket_count(side),
             "node {} has no {side:?} socket {index}",
             self.id,
         );
@@ -313,6 +335,7 @@ pub(in crate::editor) fn std_kind(type_id: &str) -> NodeKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use v_signal_nodes_core::NodeSocket;
     use v_signal_nodes_plugin_std::{GAIN, MIXER};
 
     #[test]
@@ -321,8 +344,10 @@ mod tests {
         let node = NodeWidget::new(0, config, egui::Pos2::ZERO);
 
         assert!(node.rect().height() > MIN_NODE_HEIGHT);
-        assert_eq!(node.config.inputs.len(), 3);
-        assert_eq!(node.config.outputs.len(), 1);
+        assert_eq!(node.config.socket_count(SocketKind::Input), 3);
+        assert_eq!(node.config.socket_count(SocketKind::Output), 1);
+        assert_eq!(node.sockets().count(), 4);
+        assert_eq!(node.sockets().last(), Some(SocketRef::output(0, 0)));
         assert_ne!(
             node.socket_pos(SocketKind::Input, 0),
             node.socket_pos(SocketKind::Input, 2),
@@ -343,7 +368,7 @@ mod tests {
     #[test]
     fn node_param_label_follows_language() {
         let config = NodeConfig::for_kind(&std_kind(GAIN));
-        let param = &config.content[0];
+        let param = &config.params[0];
 
         assert_eq!(config.param_label(param, Language::English), "Gain: 1.0");
         assert_eq!(
@@ -381,7 +406,7 @@ mod tests {
         );
         let labels = |language| {
             config
-                .content
+                .params
                 .iter()
                 .map(|param| config.param_label(param, language))
                 .collect::<Vec<_>>()

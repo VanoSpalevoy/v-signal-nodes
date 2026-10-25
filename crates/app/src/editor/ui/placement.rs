@@ -6,8 +6,8 @@
 //! - [`settle`] — for dropping a dragged node: if a free spot is within
 //!   [`DROP_SNAP_DISTANCE`], the node moves there; otherwise it stays where it
 //!   was dropped and pushes its neighbors aside, which may push theirs in turn.
-//! - [`free_pos`] — for adding and snapping: the nearest free position to the
-//!   wanted one, searched outwards on a grid.
+//! - [`free_pos`] — for adding ([`place_new_node`]) and snapping ([`snap`]): the
+//!   nearest free position to the wanted one, searched outwards on a grid.
 //!
 //! Everything is in canvas coordinates, and positions never go negative.
 
@@ -63,14 +63,8 @@ pub(super) fn blocked(rect: egui::Rect, obstacles: &[egui::Rect]) -> bool {
 /// that the nodes other than `dropped` were apart before) and no negative position.
 pub(in crate::editor) fn settle(rects: &[egui::Rect], dropped: usize) -> Vec<egui::Pos2> {
     let mut rects = rects.to_vec();
-    let others: Vec<_> = rects
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| *index != dropped)
-        .map(|(_, rect)| *rect)
-        .collect();
     let rect = rects[dropped];
-    if let Some(pos) = nearest_free_within(rect, &others, DROP_SNAP_DISTANCE) {
+    if let Some(pos) = nearest_free_within(rect, &all_but(&rects, dropped), DROP_SNAP_DISTANCE) {
         rects[dropped] = egui::Rect::from_min_size(pos, rect.size());
     } else {
         push_apart(&mut rects, dropped);
@@ -138,12 +132,7 @@ fn push_apart(rects: &mut [egui::Rect], fixed: usize) {
     }
 
     for index in (0..rects.len()).filter(|index| *index != fixed) {
-        let others: Vec<_> = rects
-            .iter()
-            .enumerate()
-            .filter(|(other, _)| *other != index)
-            .map(|(_, rect)| *rect)
-            .collect();
+        let others = all_but(rects, index);
         let rect = rects[index];
         if blocked(rect, &others) {
             let pos = free_pos(rect.min, rect.size(), &others, PLACEMENT_STEP);
@@ -177,7 +166,7 @@ fn push_out(rect: egui::Rect, pusher: egui::Rect) -> egui::Vec2 {
 /// Searches square rings of growing radius and takes the closest free candidate
 /// of the first ring that has one. Falls back to `wanted` if nothing is free
 /// within [`MAX_SEARCH_RINGS`] rings.
-pub(in crate::editor) fn free_pos(
+fn free_pos(
     wanted: egui::Pos2,
     size: egui::Vec2,
     obstacles: &[egui::Rect],
@@ -198,6 +187,30 @@ pub(in crate::editor) fn free_pos(
         }
     }
     wanted
+}
+
+/// New top-left positions of all `rects` snapped to the nearest point of a `step`
+/// grid (anchored at the canvas origin) that keeps clear of the others. Nodes are
+/// placed one by one, each against the current positions of all the others.
+pub(in crate::editor) fn snap(rects: &[egui::Rect], step: f32) -> Vec<egui::Pos2> {
+    let mut rects = rects.to_vec();
+    for index in 0..rects.len() {
+        let rect = rects[index];
+        let snapped = (rect.min / step).round() * step;
+        let pos = free_pos(snapped, rect.size(), &all_but(&rects, index), step);
+        rects[index] = egui::Rect::from_min_size(pos, rect.size());
+    }
+    rects.iter().map(|rect| rect.min).collect()
+}
+
+/// Every rect of `rects` except the one at `index`.
+fn all_but(rects: &[egui::Rect], index: usize) -> Vec<egui::Rect> {
+    rects
+        .iter()
+        .enumerate()
+        .filter(|(other, _)| *other != index)
+        .map(|(_, rect)| *rect)
+        .collect()
 }
 
 /// Where a new node with `config` wanted at `wanted` actually goes: the nearest

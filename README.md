@@ -1,36 +1,68 @@
+<div align="center">
+
 # v-signal-nodes
 
-A node-based signal and audio graph editor written in Rust with
-[egui](https://github.com/emilk/egui). Every node type (generators, processors,
-outputs) comes from a plugin, so the editor itself knows no node types.
+**A node-based signal and audio graph editor written in Rust**
 
+[![CI](https://github.com/VanoSpalevoy/v-signal-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/VanoSpalevoy/v-signal-forge/actions/workflows/ci.yml)
+![Rust 1.99.1](https://img.shields.io/badge/rust-1.99.1-orange?logo=rust)
+![egui 0.36](https://img.shields.io/badge/egui-0.36-blue)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
+
+**English** · [Русский](README.ru.md)
+
+</div>
+
+Build signal processing out of nodes (generators, processors, outputs) wired
+together on a canvas. Every node type comes from a plugin, so the editor itself
+knows no node types and grows without changes to its code.
+
+> [!NOTE]
 > **Status: early development.** You can build graphs in the editor, but nothing
 > plays yet: there's no processing runtime. You can't edit parameters or save
 > graphs yet either. The plugin API is still changing, and plugins built for one
 > API version are refused by hosts built for another.
 
+## Contents
+
+- [Features](#features)
+- [Getting started](#getting-started)
+- [Using the editor](#using-the-editor)
+- [Project layout](#project-layout)
+- [Writing a plugin](#writing-a-plugin)
+- [Roadmap](#roadmap)
+- [Development](#development)
+- [License](#license)
+
 ## Features
 
-- Canvas with zoom (0.5–2×), scroll bars and a dot grid. You can snap nodes to
-  the grid, and nodes never overlap: a dropped node takes a nearby free spot or
-  pushes its neighbours aside. A preview shows the result while you drag.
-- Connections are routed around nodes and drawn with a color gradient between
-  the two node types. Cycles and self-connections are refused.
-- An English or Russian interface. Plugins translate their own node labels, and
-  nodes on the canvas switch language with the editor.
-- A plugin API for Rust crates linked into the editor and for dynamic libraries
-  loaded through a C ABI. The C ABI is implemented, but the editor can't load
-  libraries yet.
-- Standard nodes: `std.source` (sine/square/saw/triangle), `std.gain`,
+- **A canvas where nodes never overlap.** Zoom (0.5–2×), scroll bars, a dot
+  grid and snap to grid. A dropped node takes a nearby free spot or pushes its
+  neighbours aside, and a preview shows the result while you drag.
+- **Wires that go around nodes.** Connections are routed around nodes (A* on an
+  orthogonal grid, with rounded corners) and drawn with a color gradient from
+  the source node to the target. Only routes near a moved node are recomputed,
+  so large graphs stay smooth.
+- **A graph that stays valid.** Cycles and self-connections are refused, each
+  input has at most one source, and the bottom panel shows why a connection was
+  refused.
+- **Plugins.** Rust crates linked into the editor, or dynamic libraries loaded
+  through a C ABI, with an API version check and panics caught at the boundary.
+- **Two languages.** An English or Russian interface. Plugins translate their
+  own node labels, and nodes on the canvas switch language with the editor.
+- **Standard nodes:** `std.source` (sine/square/saw/triangle), `std.gain`,
   `std.mixer`, `std.sink`.
 
-## Building
+## Getting started
 
-Requires a stable Rust toolchain with edition 2024 support (Rust 1.85 or newer).
+Requires Rust 1.99.1. The version is pinned in `rust-toolchain.toml`, so rustup
+installs it for you.
 
 ```sh
-cargo run -p v-signal-nodes-app       # run the editor (binary: v-signal-nodes)
-cargo build -p v-signal-nodes-app --release
+git clone https://github.com/VanoSpalevoy/v-signal-forge.git
+cd v-signal-forge
+cargo run -p v-signal-nodes-app               # run the editor
+cargo build -p v-signal-nodes-app --release   # release build: target/release/v-signal-nodes
 ```
 
 On Linux, eframe needs the usual X11/Wayland development packages, for example
@@ -45,31 +77,44 @@ unoptimized editor stutters when it routes connections.
 
 ## Using the editor
 
-| Action                            | How                                              |
-|-----------------------------------|--------------------------------------------------|
-| Add a node                        | Click it in the palette, or drag it onto the canvas |
-| Move a node                       | Drag its body (`Esc` while dragging cancels the move) |
-| Connect                           | Click an output socket, then an input socket     |
-| Disconnect                        | Right-click a socket                             |
-| Delete a node                     | The cross in its header                          |
-| Clear the selection               | Click empty canvas or press `Esc`                |
-| Zoom, snap to grid, language      | Toolbar                                          |
+| Action                       | How                                                    |
+|------------------------------|--------------------------------------------------------|
+| Add a node                   | Click it in the palette, or drag it onto the canvas    |
+| Move a node                  | Drag its body (`Esc` while dragging cancels the move)  |
+| Connect                      | Click an output socket, then an input socket           |
+| Disconnect                   | Right-click a socket                                   |
+| Delete a node                | The cross in its header                                |
+| Clear the selection          | Click empty canvas or press `Esc`                      |
+| Zoom, snap to grid, language | Toolbar                                                |
 
 Each input takes one connection. Connecting an input that is already connected
 replaces its old connection. The bottom panel lists the connections and shows
 why a connection was refused.
 
-## Workspace
+## Project layout
 
-| Crate                         | What it is                                                     |
-|-------------------------------|----------------------------------------------------------------|
-| `crates/app`                  | The egui editor                                                |
-| `crates/core`                 | Node model: node specs, parameters, sockets, translations      |
-| `crates/plugin-api`           | The plugin contract and its C ABI (`ffi`)                      |
-| `crates/plugin-host`          | Loads plugins (linked or from a dynamic library) and builds nodes |
-| `crates/plugin-std`           | The standard nodes (`std.*`)                                   |
-| `crates/plugin-stub`          | A do-nothing node used to test the plugin path                 |
-| `crates/runtime`              | Graph processing; a placeholder for now                        |
+```mermaid
+flowchart LR
+    app["app<br/>egui editor"] --> host["plugin-host<br/>plugin loading"]
+    app --> core["core<br/>node model"]
+    host --> api["plugin-api<br/>contract + C ABI"]
+    api --> core
+    std["plugin-std<br/>std.*"] --> api
+    stub["plugin-stub"] --> api
+    app --> std
+    app --> stub
+    dylib["your plugin<br/>.dll / .so / .dylib"] -. C ABI .-> host
+```
+
+| Crate                 | What it is                                                     |
+|-----------------------|----------------------------------------------------------------|
+| `crates/app`          | The egui/eframe editor                                         |
+| `crates/core`         | Node model: node specs, parameters, sockets, translations; no dependencies |
+| `crates/plugin-api`   | The plugin contract and its C ABI (`ffi`)                      |
+| `crates/plugin-host`  | Loads plugins (linked or from a dynamic library) and builds nodes |
+| `crates/plugin-std`   | The standard nodes (`std.*`), the reference plugin            |
+| `crates/plugin-stub`  | A do-nothing node used to test the plugin → editor path       |
+| `crates/runtime`      | Graph processing; a placeholder for now                        |
 
 API docs: `cargo doc --workspace --no-deps --open`.
 
@@ -136,7 +181,7 @@ impl NodeProcessor for InvertProcessor {
 export_plugin!(MyPlugin);
 ```
 
-Rules for node specs:
+### Node spec rules
 
 - **Type ids** are namespaced by the plugin, for example `my.invert`, and must
   be unique across all loaded plugins.
@@ -150,7 +195,7 @@ Rules for node specs:
   empty ids, duplicate sockets or parameters, out-of-range defaults, and
   translations of labels that don't exist.
 
-Processor life cycle:
+### Processor life cycle
 
 - The host calls `prepare(sample_rate, max_frames)` before the first `process`
   and again when either value changes. That's the place to allocate memory,
@@ -160,10 +205,24 @@ Processor life cycle:
 - Panics in dynamic-library plugins are caught at the C ABI boundary. This
   requires `panic = "unwind"`, which is the default.
 
-To add a plugin to the editor today, add the crate as a dependency of
-`crates/app` and load it in `builtin_plugins` in `crates/app/src/editor.rs`.
-`PluginHost::load_library` can already load a dynamic library, but the editor
-doesn't call it yet.
+### Adding a plugin to the editor
+
+For now, add the crate as a dependency of `crates/app` and load it in
+`builtin_plugins` in `crates/app/src/editor.rs`. `PluginHost::load_library` can
+already load a dynamic library, but the editor doesn't call it yet.
+
+## Roadmap
+
+- [x] Canvas, nodes, connections, wires routed around nodes
+- [x] Plugin API: linked plugins and a C ABI
+- [x] Localized interface and node labels
+- [x] CI on Linux, macOS and Windows
+- [ ] Graph in `core` with connection checks and generational node ids
+- [ ] Graph runtime: real-time processing and an offline pass
+- [ ] Editing node parameters
+- [ ] Saving and loading graphs, undo and redo
+- [ ] Selecting and moving several nodes at once
+- [ ] Loading external plugins from the editor
 
 ## Development
 

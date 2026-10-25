@@ -29,8 +29,14 @@ pub struct ParamSpec {
 /// Current value of a parameter.
 ///
 /// Not part of the C ABI: dynamically loaded plugins get values as
-/// `plugin-api`'s `ffi::FfiParamValue`.
+/// `plugin-api`'s `ffi::FfiParamValue`. With the `serde` feature it serializes as
+/// `{"number": 1.0}`, `{"choice": 0}` or `{"toggle": true}`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum ParamValue {
     Number(f32),
     /// Index into [`ParamKind::Choice::options`].

@@ -44,8 +44,28 @@ pub(super) struct RoutedConnection {
 }
 
 impl RoutedConnection {
+    /// The connection from `from` to `to`, routed as `route` for its current `ends`.
+    fn routed(
+        to: SocketRef,
+        from: SocketRef,
+        ends: [egui::Pos2; 2],
+        key: u64,
+        route: Route,
+    ) -> Self {
+        Self::new(to, from, ends, key, route, false)
+    }
+
+    /// A stand-in for the connection from `from` to `to` that the budget left
+    /// unrouted: the plain curve between its current `ends`.
+    fn provisional(to: SocketRef, from: SocketRef, ends: [egui::Pos2; 2], key: u64) -> Self {
+        let [start, end] = ends;
+        let curve = routing::bezier(start, end, CONNECTION_MIN_HANDLE);
+        Self::new(to, from, ends, key, Route::Curve(curve), true)
+    }
+
     fn new(
-        (to, from): (SocketRef, SocketRef),
+        to: SocketRef,
+        from: SocketRef,
         ends: [egui::Pos2; 2],
         key: u64,
         route: Route,
@@ -143,8 +163,9 @@ impl RouteCache {
                 .map(|node| node.socket_pos(socket.side, socket.index))
         };
         // Sorted by ID, so raising a node (which only reorders `nodes`) changes no key.
-        let mut node_rects: Vec<_> = nodes.iter().map(|node| (node.id, node.rect())).collect();
-        node_rects.sort_by_key(|(id, _)| *id);
+        let mut by_id_order: Vec<&NodeWidget> = nodes.iter().collect();
+        by_id_order.sort_by_key(|node| node.id);
+        let node_rects: Vec<_> = by_id_order.iter().map(|node| node.rect()).collect();
 
         let mut ends: Vec<_> = connections
             .iter()
@@ -168,51 +189,20 @@ impl RouteCache {
         let started = Instant::now();
         let refresh_budget = budget.mul_f32(REFRESH_SHARE);
         for &(to, from, start, end) in &ends {
-            let area = routing::influence(start, end, CONNECTION_MIN_HANDLE);
-            let obstacles: Vec<_> = node_rects
-                .iter()
-                .map(|(_, rect)| *rect)
-                .filter(|rect| rect.intersects(area))
-                .collect();
-            let mut hasher = KeyHasher::default();
-            hash_points(&mut hasher, &[start, end]);
-            for rect in &obstacles {
-                hash_points(&mut hasher, &[rect.min, rect.max]);
-            }
-            // Wires from the same output are siblings: fanning out may share a stretch.
-            let mut wires: Vec<&[egui::Pos2]> = Vec::new();
-            let mut siblings: Vec<&[egui::Pos2]> = Vec::new();
-            for (_, stub) in stubs.iter().filter(|(source, stub)| {
-                *source != from && egui::Rect::from_two_pos(stub[0], stub[1]).intersects(area)
-            }) {
-                hash_points(&mut hasher, stub);
-                wires.push(stub);
-            }
-            for earlier in routed
-                .iter()
-                .filter(|earlier| earlier.bounds.intersects(area))
-            {
-                // Distinguishes a sibling from a wire of the same shape.
-                (earlier.from == from).hash(&mut hasher);
-                earlier.shape.hash(&mut hasher);
-                if earlier.from == from {
-                    siblings.push(&earlier.polyline);
-                } else {
-                    wires.push(&earlier.polyline);
-                }
-            }
-            let key = hasher.finish();
+            let ends = [start, end];
+            let inputs = RouteInputs::gather(from, ends, &node_rects, &stubs, &routed);
+            let key = inputs.key;
 
             let spent = |limit: Duration| update.recomputed > 0 && started.elapsed() >= limit;
             let cached = previous.remove(&to).filter(|cached| cached.from == from);
-            let same_ends = |cached: &RoutedConnection| cached.ends == [start, end];
+            let same_ends = |cached: &RoutedConnection| cached.ends == ends;
             let connection = match cached {
                 Some(cached) if cached.key == key && !cached.provisional => cached,
                 Some(cached)
                     if !cached.provisional
                         && same_ends(&cached)
                         && spent(refresh_budget)
-                        && routing::still_clear(&cached.route, &obstacles) =>
+                        && routing::still_clear(&cached.route, &inputs.obstacles) =>
                 {
                     update.deferred += 1;
                     cached
@@ -221,11 +211,7 @@ impl RouteCache {
                     update.deferred += 1;
                     match cached {
                         Some(cached) if same_ends(&cached) => cached,
-                        _ => {
-                            let curve = routing::bezier(start, end, CONNECTION_MIN_HANDLE);
-                            let route = Route::Curve(curve);
-                            RoutedConnection::new((to, from), [start, end], key, route, true)
-                        }
+                        _ => RoutedConnection::provisional(to, from, ends, key),
                     }
                 }
                 _ => {
@@ -233,12 +219,12 @@ impl RouteCache {
                     let route = routing::route(
                         start,
                         end,
-                        &obstacles,
-                        &wires,
-                        &siblings,
+                        &inputs.obstacles,
+                        &inputs.wires,
+                        &inputs.siblings,
                         CONNECTION_MIN_HANDLE,
                     );
-                    RoutedConnection::new((to, from), [start, end], key, route, false)
+                    RoutedConnection::routed(to, from, ends, key, route)
                 }
             };
             routed.push(connection);
@@ -246,6 +232,72 @@ impl RouteCache {
         self.routes = routed;
         self.settled = update.deferred == 0;
         update
+    }
+}
+
+/// What one connection's route depends on: the nodes, wires and siblings within
+/// its [`routing::influence`] area, and a key hashing them with the connection's
+/// ends (see [`RouteCache::update`]).
+struct RouteInputs<'a> {
+    obstacles: Vec<egui::Rect>,
+    /// Stubs of other outputs' connections and earlier routes from other outputs.
+    wires: Vec<&'a [egui::Pos2]>,
+    /// Earlier routes from the same output: fanning out may share a stretch.
+    siblings: Vec<&'a [egui::Pos2]>,
+    key: u64,
+}
+
+impl<'a> RouteInputs<'a> {
+    /// The inputs of the connection from output `from` between `ends`, given
+    /// `node_rects` (sorted by node ID), the `stubs` of every connection with
+    /// its output, and the connections `routed` before this one.
+    fn gather(
+        from: SocketRef,
+        ends: [egui::Pos2; 2],
+        node_rects: &[egui::Rect],
+        stubs: &'a [(SocketRef, [egui::Pos2; 2])],
+        routed: &'a [RoutedConnection],
+    ) -> Self {
+        let [start, end] = ends;
+        let area = routing::influence(start, end, CONNECTION_MIN_HANDLE);
+        let obstacles: Vec<_> = node_rects
+            .iter()
+            .copied()
+            .filter(|rect| rect.intersects(area))
+            .collect();
+        let mut hasher = KeyHasher::default();
+        hash_points(&mut hasher, &ends);
+        for rect in &obstacles {
+            hash_points(&mut hasher, &[rect.min, rect.max]);
+        }
+        let mut wires: Vec<&[egui::Pos2]> = Vec::new();
+        let mut siblings: Vec<&[egui::Pos2]> = Vec::new();
+        for (_, stub) in stubs.iter().filter(|(source, stub)| {
+            *source != from && egui::Rect::from_two_pos(stub[0], stub[1]).intersects(area)
+        }) {
+            hash_points(&mut hasher, stub);
+            wires.push(stub);
+        }
+        for earlier in routed
+            .iter()
+            .filter(|earlier| earlier.bounds.intersects(area))
+        {
+            let sibling = earlier.from == from;
+            // Distinguishes a sibling from a wire of the same shape.
+            sibling.hash(&mut hasher);
+            earlier.shape.hash(&mut hasher);
+            if sibling {
+                siblings.push(&earlier.polyline);
+            } else {
+                wires.push(&earlier.polyline);
+            }
+        }
+        Self {
+            obstacles,
+            wires,
+            siblings,
+            key: hasher.finish(),
+        }
     }
 }
 

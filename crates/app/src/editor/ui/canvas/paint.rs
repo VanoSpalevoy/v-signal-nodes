@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use super::{CONNECTION_MIN_HANDLE, HEADER_HEIGHT, Hovered, View, delete_button_rect, drop_rect};
 use crate::editor::ui::routing::{self, Route};
 use crate::editor::ui::{ACCENT, DANGER, NodeKind, PANEL_BG, TEXT, TEXT_DIM, node_color};
-use crate::editor::{NodeWidget, SocketKind, VSignalNodesApp};
+use crate::editor::{Language, NodeWidget, SocketKind, VSignalNodesApp};
 
 /// Corner radius of a node.
 const NODE_ROUNDING: f32 = 8.0;
@@ -291,49 +291,15 @@ fn paint_grid(painter: &egui::Painter, view: View, viewport: egui::Rect) {
 fn paint_nodes(app: &VSignalNodesApp, painter: &egui::Painter, view: View, hovered: &Hovered) {
     let language = app.language;
     for node in &app.nodes {
-        let color = node_color(node.kind());
         let rect = view.rect(node.rect());
         let rounding = view.len(NODE_ROUNDING);
-
         painter.rect_filled(rect, rounding, PANEL_BG);
-        let header =
-            egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), view.len(HEADER_HEIGHT)));
-        let top_rounding = rounding.round().clamp(0.0, 255.0) as u8;
-        painter.rect_filled(
-            header,
-            egui::CornerRadius {
-                nw: top_rounding,
-                ne: top_rounding,
-                sw: 0,
-                se: 0,
-            },
-            color.gamma_multiply(HEADER_TINT),
-        );
-        painter.hline(
-            header.x_range(),
-            header.bottom(),
-            egui::Stroke::new(view.len(1.0), color.gamma_multiply(0.3)),
-        );
+        paint_header(painter, view, node, language);
         painter.rect_stroke(
             rect,
             rounding,
-            egui::Stroke::new(view.len(NODE_OUTLINE_WIDTH), color),
+            egui::Stroke::new(view.len(NODE_OUTLINE_WIDTH), node_color(node.kind())),
             egui::StrokeKind::Inside,
-        );
-
-        let title_rect = painter.text(
-            egui::pos2(rect.left() + view.len(TITLE_PADDING), header.center().y),
-            egui::Align2::LEFT_CENTER,
-            node.kind().label(language),
-            view.font(13.0),
-            TEXT,
-        );
-        painter.text(
-            egui::pos2(title_rect.right() + view.len(5.0), header.center().y),
-            egui::Align2::LEFT_CENTER,
-            format!("#{}", node.id),
-            view.font(11.0),
-            TEXT_DIM,
         );
         for (index, param) in node.config.params.iter().enumerate() {
             painter.text(
@@ -347,6 +313,46 @@ fn paint_nodes(app: &VSignalNodesApp, painter: &egui::Painter, view: View, hover
         paint_sockets(app, node, painter, view, hovered);
         paint_delete_button(painter, view, node, hovered.delete_button == Some(node.id));
     }
+}
+
+/// Draws a node's header: the band tinted with the kind color (rounded at the
+/// top like the node), a faint line under it, and the title (`Kind #id`).
+fn paint_header(painter: &egui::Painter, view: View, node: &NodeWidget, language: Language) {
+    let color = node_color(node.kind());
+    let rect = view.rect(node.rect());
+    let header =
+        egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), view.len(HEADER_HEIGHT)));
+    let top_rounding = view.len(NODE_ROUNDING).round().clamp(0.0, 255.0) as u8;
+    painter.rect_filled(
+        header,
+        egui::CornerRadius {
+            nw: top_rounding,
+            ne: top_rounding,
+            sw: 0,
+            se: 0,
+        },
+        color.gamma_multiply(HEADER_TINT),
+    );
+    painter.hline(
+        header.x_range(),
+        header.bottom(),
+        egui::Stroke::new(view.len(1.0), color.gamma_multiply(0.3)),
+    );
+
+    let title_rect = painter.text(
+        egui::pos2(rect.left() + view.len(TITLE_PADDING), header.center().y),
+        egui::Align2::LEFT_CENTER,
+        node.kind().label(language),
+        view.font(13.0),
+        TEXT,
+    );
+    painter.text(
+        egui::pos2(title_rect.right() + view.len(5.0), header.center().y),
+        egui::Align2::LEFT_CENTER,
+        format!("#{}", node.id),
+        view.font(11.0),
+        TEXT_DIM,
+    );
 }
 
 /// Draws the delete button as a cross made of two lines, so it is always exactly

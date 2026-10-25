@@ -33,7 +33,7 @@ impl VSignalNodesApp {
                 pos: [node.pos.x, node.pos.y],
                 params: node
                     .param_values()
-                    .map(|(id, value)| (id.to_owned(), value.into()))
+                    .map(|(id, value)| (id.to_owned(), value))
                     .collect(),
             })
             .collect();
@@ -90,7 +90,7 @@ impl VSignalNodesApp {
             let params = doc_node
                 .params
                 .iter()
-                .map(|(param_id, &value)| (param_id.as_str(), value.into()));
+                .map(|(param_id, &value)| (param_id.as_str(), value));
             let config = self.build_config(kind, id, params)?;
             let [x, y] = doc_node.pos;
             let pos = ui::place_new_node(&nodes, &config, egui::pos2(x, y));
@@ -136,7 +136,6 @@ impl VSignalNodesApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::DocParamValue;
     use crate::editor::tests::assert_apart;
     use v_signal_nodes_core::ParamValue;
     use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE};
@@ -201,9 +200,8 @@ mod tests {
     fn document_params_are_saved_and_checked() {
         let mut document = sample_graph().to_document();
         let gain = document.nodes.iter_mut().find(|node| node.id == 1).unwrap();
-        assert_eq!(gain.params["gain"], DocParamValue::Number(1.0));
-        gain.params
-            .insert("gain".into(), DocParamValue::Number(0.25));
+        assert_eq!(gain.params["gain"], ParamValue::Number(1.0));
+        gain.params.insert("gain".into(), ParamValue::Number(0.25));
         let mut opened = VSignalNodesApp::default();
 
         opened.open_document(&document).unwrap();
@@ -226,7 +224,7 @@ mod tests {
             to_node,
             to_input,
         };
-        let set_gain = |value: DocParamValue| {
+        let set_gain = |value: ParamValue| {
             move |doc: &mut Document| {
                 let gain = doc.nodes.iter_mut().find(|node| node.id == 1).unwrap();
                 gain.params.insert("gain".into(), value);
@@ -255,16 +253,16 @@ mod tests {
                 Box::new(|doc| {
                     doc.nodes[0]
                         .params
-                        .insert("nope".into(), DocParamValue::Toggle(true));
+                        .insert("nope".into(), ParamValue::Toggle(true));
                 }),
             ),
             (
                 "param out of range",
-                Box::new(set_gain(DocParamValue::Number(9.0))),
+                Box::new(set_gain(ParamValue::Number(9.0))),
             ),
             (
                 "param of the wrong kind",
-                Box::new(set_gain(DocParamValue::Toggle(true))),
+                Box::new(set_gain(ParamValue::Toggle(true))),
             ),
             (
                 "missing node",

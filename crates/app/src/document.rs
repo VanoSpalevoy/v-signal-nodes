@@ -30,7 +30,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use v_signal_nodes_core::AppError;
+use v_signal_nodes_core::{AppError, ParamValue};
 
 /// Version of the file format written by this build. Bump it on any incompatible
 /// change and migrate older versions in [`Document::from_json`].
@@ -66,38 +66,7 @@ pub(crate) struct DocNode {
     pub pos: [f32; 2],
     /// Parameter values by parameter id. Parameters left out get their default.
     #[serde(default)]
-    pub params: BTreeMap<String, DocParamValue>,
-}
-
-/// A parameter value, mirroring `core::ParamValue` (which has no serde support).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum DocParamValue {
-    Number(f32),
-    /// Index of the chosen option.
-    Choice(usize),
-    Toggle(bool),
-}
-
-impl From<v_signal_nodes_core::ParamValue> for DocParamValue {
-    fn from(value: v_signal_nodes_core::ParamValue) -> Self {
-        use v_signal_nodes_core::ParamValue as Core;
-        match value {
-            Core::Number(value) => Self::Number(value),
-            Core::Choice(index) => Self::Choice(index),
-            Core::Toggle(on) => Self::Toggle(on),
-        }
-    }
-}
-
-impl From<DocParamValue> for v_signal_nodes_core::ParamValue {
-    fn from(value: DocParamValue) -> Self {
-        match value {
-            DocParamValue::Number(value) => Self::Number(value),
-            DocParamValue::Choice(index) => Self::Choice(index),
-            DocParamValue::Toggle(on) => Self::Toggle(on),
-        }
-    }
+    pub params: BTreeMap<String, ParamValue>,
 }
 
 /// A connection from output `from_output` of node `from_node` to input
@@ -152,7 +121,7 @@ impl Document {
         }
         for node in &document.nodes {
             let numbers = node.params.values().filter_map(|value| match value {
-                DocParamValue::Number(value) => Some(*value),
+                ParamValue::Number(value) => Some(*value),
                 _ => None,
             });
             if !node.pos.into_iter().chain(numbers).all(f32::is_finite) {
@@ -203,9 +172,9 @@ mod tests {
                     type_id: "std.gain".into(),
                     pos: [300.0, 60.0],
                     params: BTreeMap::from([
-                        ("gain".into(), DocParamValue::Number(0.5)),
-                        ("mode".into(), DocParamValue::Choice(1)),
-                        ("on".into(), DocParamValue::Toggle(false)),
+                        ("gain".into(), ParamValue::Number(0.5)),
+                        ("mode".into(), ParamValue::Choice(1)),
+                        ("on".into(), ParamValue::Toggle(false)),
                     ]),
                 },
             ],
@@ -256,7 +225,7 @@ mod tests {
         }"#;
         let document = Document::from_json(json).unwrap();
         assert!(document.used_plugins.is_empty());
-        assert_eq!(document.nodes[0].params["gain"], DocParamValue::Number(2.0));
+        assert_eq!(document.nodes[0].params["gain"], ParamValue::Number(2.0));
         assert!(document.nodes[1].params.is_empty());
     }
 

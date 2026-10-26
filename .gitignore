@@ -28,3 +28,5 @@ target
 /dist
 # Ignore macos specific files
 .DS_Store
+
+TODO.txt

@@ -6,8 +6,9 @@
 
 use eframe::egui;
 
-use super::{Hovered, View, delete_button_rect, drop_rect, socket_rect};
-use crate::editor::{NodeConfig, NodeKind, SocketKind, SocketRef, Text, VSignalNodesApp};
+use super::{Hovered, View, centered_on, delete_button_rect, socket_rect};
+use crate::editor::{NodeKind, SocketRef, Text, VSignalNodesApp};
+use v_signal_nodes_core::NodeId;
 
 /// Distance from the viewport edge at which dragging a node starts scrolling (screen points).
 const EDGE_SCROLL_ZONE: f32 = 32.0;
@@ -20,23 +21,24 @@ pub(super) fn add_requested_node(app: &mut VSignalNodesApp, view: View, viewport
     let Some(kind) = app.requested_node.take() else {
         return;
     };
-    let size = NodeConfig::for_kind(&kind).size();
-    app.add_node_at(kind, view.to_canvas(viewport.center()) - size * 0.5);
+    let pos = centered_on(&kind, view.to_canvas(viewport.center()));
+    app.add_node_at(kind, pos);
 }
 
-/// Adds the node when a palette drag is released over the canvas viewport
-/// (`pointer` is `None` otherwise). Releases elsewhere are cleaned up by egui.
+/// Adds the node centered on the pointer when a palette drag is released over
+/// the canvas viewport (`pointer` is `None` otherwise). Releases elsewhere are
+/// cleaned up by egui.
 pub(super) fn finish_palette_drop(
     app: &mut VSignalNodesApp,
     ui: &egui::Ui,
     view: View,
     pointer: Option<egui::Pos2>,
 ) {
-    if let Some(pos) = pointer
+    if let Some(pointer) = pointer
         && ui.input(|input| input.pointer.any_released())
         && let Some(kind) = egui::DragAndDrop::take_payload::<NodeKind>(ui.ctx())
     {
-        let pos = drop_rect(&kind, pos, view, &app.nodes).min;
+        let pos = centered_on(&kind, view.to_canvas(pointer));
         app.add_node_at((*kind).clone(), pos);
     }
 }
@@ -86,7 +88,7 @@ fn edge_scroll(ui: &egui::Ui, viewport: egui::Rect, pointer: egui::Pos2) {
 fn drag_node(
     app: &mut VSignalNodesApp,
     ui: &egui::Ui,
-    node_id: usize,
+    node_id: NodeId,
     response: &egui::Response,
     view: View,
     viewport: egui::Rect,
@@ -95,7 +97,7 @@ fn drag_node(
         return;
     };
     if response.drag_started()
-        && let Some(node) = app.nodes.iter().find(|node| node.id == node_id)
+        && let Some(node) = app.node(node_id)
     {
         // Measure the grab offset from where the button went down, before the drag threshold moved the pointer.
         let press = ui
@@ -133,113 +135,64 @@ pub(super) fn handle_node_interactions(
     let mut deleted_node_id = None;
     let mut raised_node_id = None;
 
-    for node_index in 0..app.nodes.len() {
-        let node = &app.nodes[node_index];
+    for node_id in app.z_order.clone() {
+        let Some(node) = app.node(node_id) else {
+            continue;
+        };
         // Ids are derived from the node ID, not from creation order, so they stay
         // stable when nodes are added, deleted or reordered.
-        let body_response = ui.interact(
+        let body = ui.interact(
             view.rect(node.rect()),
-            ui.scope_id().with(("canvas_node", node.id)),
+            ui.scope_id().with(("canvas_node", node_id)),
             egui::Sense::click_and_drag(),
         );
-
-        let socket_responses = |side: SocketKind, count: usize| -> Vec<egui::Response> {
-            (0..count)
-                .map(|index| {
-                    ui.interact(
-                        socket_rect(node, side, index, view),
-                        ui.scope_id().with(("canvas_socket", node.id, side, index)),
+        let sockets: Vec<(SocketRef, egui::Response)> = node
+            .sockets()
+            .map(|socket| {
+                let response = ui
+                    .interact(
+                        socket_rect(&node, socket, view),
+                        ui.scope_id().with(("canvas_socket", socket)),
                         egui::Sense::click(),
                     )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                })
-                .collect()
-        };
-        let input_responses = socket_responses(SocketKind::Input, node.config.inputs.len());
-        let output_responses = socket_responses(SocketKind::Output, node.config.outputs.len());
-        let delete_response = ui
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                (socket, response)
+            })
+            .collect();
+        let delete = ui
             .interact(
-                view.rect(delete_button_rect(node)),
-                ui.scope_id().with(("canvas_node_delete", node.id)),
+                view.rect(delete_button_rect(&node)),
+                ui.scope_id().with(("canvas_node_delete", node_id)),
                 egui::Sense::click(),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(app.language.text(Text::DeleteNode));
 
-        let node_id = node.id;
-        drag_node(app, ui, node_id, &body_response, view, viewport);
-        if body_response.clicked() || body_response.drag_started() {
+        drag_node(app, ui, node_id, &body, view, viewport);
+        if body.clicked() || body.drag_started() {
             raised_node_id = Some(node_id);
         }
-
-        for (side, responses) in [
-            (SocketKind::Input, &input_responses),
-            (SocketKind::Output, &output_responses),
-        ] {
-            if let Some(index) = responses.iter().position(egui::Response::hovered) {
-                hovered.socket = Some(SocketRef {
-                    node_id,
-                    side,
-                    index,
-                });
-            }
-        }
-        if delete_response.hovered() {
+        if delete.hovered() {
             hovered.delete_button = Some(node_id);
         }
-
-        if delete_response.clicked_by(egui::PointerButton::Primary) {
+        if delete.clicked_by(egui::PointerButton::Primary) {
             deleted_node_id = Some(node_id);
             continue;
         }
 
-        if let Some(index) = output_responses
-            .iter()
-            .position(|response| response.clicked_by(egui::PointerButton::Primary))
-        {
-            app.pending_source = Some(SocketRef {
-                node_id,
-                side: SocketKind::Output,
-                index,
-            });
-            app.connection_refused = false;
-        }
-
-        if let Some(index) = input_responses
-            .iter()
-            .position(|response| response.clicked_by(egui::PointerButton::Primary))
-            && let Some(from) = app.pending_source.take()
-        {
-            app.connect(
-                from,
-                SocketRef {
-                    node_id,
-                    side: SocketKind::Input,
-                    index,
-                },
-            );
-        }
-
-        if let Some(index) = output_responses
-            .iter()
-            .position(|response| response.clicked_by(egui::PointerButton::Secondary))
-        {
-            app.disconnect_output(SocketRef {
-                node_id,
-                side: SocketKind::Output,
-                index,
-            });
-        }
-
-        if let Some(index) = input_responses
-            .iter()
-            .position(|response| response.clicked_by(egui::PointerButton::Secondary))
-        {
-            app.disconnect_input(SocketRef {
-                node_id,
-                side: SocketKind::Input,
-                index,
-            });
+        for (socket, response) in sockets {
+            if response.hovered() {
+                hovered.socket = Some(socket);
+            }
+            let primary = response.clicked_by(egui::PointerButton::Primary);
+            let secondary = response.clicked_by(egui::PointerButton::Secondary);
+            match socket {
+                SocketRef::Output(output) if primary => app.select_source(output),
+                SocketRef::Input(input) if primary => app.connect_pending(input),
+                SocketRef::Output(output) if secondary => app.disconnect_output(output),
+                SocketRef::Input(input) if secondary => app.disconnect_input(input),
+                _ => {}
+            }
         }
     }
 

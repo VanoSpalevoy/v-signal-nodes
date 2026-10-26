@@ -50,8 +50,11 @@
 //! Connections are routed one after another, each against the wires of those
 //! routed before it ([`Route::polyline`]) and the [`stubs`] of all the others, so
 //! a path never runs through the spot where another connection enters its input.
-//! Wires from the same output are left out: connections fanning out of one
-//! output may share their first stretch.
+//! Wires from the same output (*siblings*) are passed separately: connections
+//! fanning out of one output may share a stretch, so a path runs along a sibling
+//! from the shared output for free, but stepping onto one from elsewhere costs
+//! [`WIRE_COST`] like crossing a wire. A curve that crosses a sibling is replaced
+//! by a path that crosses fewer, which usually branches off the sibling's trunk.
 
 use eframe::egui::{Pos2, Rect, Vec2, vec2};
 use std::cell::RefCell;
@@ -150,23 +153,27 @@ pub(super) fn influence(start: Pos2, end: Pos2, min_handle: f32) -> Rect {
 
 /// How to draw the connection from `start` to `end`, avoiding `obstacles` (node
 /// rects, including the two connected nodes) and, where possible, crossing
-/// `wires` (polylines of other connections, see the module docs). Obstacles and
-/// wires outside [`influence`] may be left out.
+/// `wires` (polylines of other outputs' connections) and `siblings` (polylines
+/// of connections from the same output), see the module docs. Crossing fewer
+/// wires comes first, then fewer siblings. Obstacles, wires and siblings outside
+/// [`influence`] may be left out.
 pub(super) fn route(
     start: Pos2,
     end: Pos2,
     obstacles: &[Rect],
     wires: &[&[Pos2]],
+    siblings: &[&[Pos2]],
     min_handle: f32,
 ) -> Route {
+    let all_crossings = |line: &[Pos2]| (crossings(line, wires), crossings(line, siblings));
     let curve = bezier(start, end, min_handle);
     let hits_node = curve_hits(&curve, obstacles);
-    let curve_crossings = crossings(&sample(&curve), wires);
-    if !hits_node && curve_crossings == 0 {
+    let curve_crossings = all_crossings(&sample(&curve));
+    if !hits_node && curve_crossings == (0, 0) {
         return Route::Curve(curve);
     }
-    match find_path(start, end, obstacles, wires) {
-        Some(path) if hits_node || crossings(&path, wires) < curve_crossings => Route::Path(path),
+    match find_path(start, end, obstacles, wires, siblings) {
+        Some(path) if hits_node || all_crossings(&path) < curve_crossings => Route::Path(path),
         _ => Route::Curve(curve),
     }
 }
@@ -237,14 +244,12 @@ fn curve_hits(curve: &[Pos2; 4], obstacles: &[Rect]) -> bool {
         .map(|i| i as f32 / CURVE_SAMPLES as f32)
         .filter(|t| (0.04..=0.96).contains(t))
         .map(|t| cubic(curve, t))
-        .any(|point| {
-            obstacles.iter().any(|rect| {
-                point.x > rect.min.x
-                    && point.x < rect.max.x
-                    && point.y > rect.min.y
-                    && point.y < rect.max.y
-            })
-        })
+        .any(|point| obstacles.iter().any(|rect| strictly_inside(point, *rect)))
+}
+
+/// Whether `point` is inside `rect`, not on its border.
+fn strictly_inside(point: Pos2, rect: Rect) -> bool {
+    point.x > rect.min.x && point.x < rect.max.x && point.y > rect.min.y && point.y < rect.max.y
 }
 
 /// Grid directions: right, left, down, up.
@@ -290,11 +295,17 @@ fn min_turns(di: i32, dj: i32, direction: usize) -> u32 {
 
 /// Orthogonal path around `obstacles`, as corner points from `start` to `end`;
 /// `None` if the search area has no way through.
-fn find_path(start: Pos2, end: Pos2, obstacles: &[Rect], wires: &[&[Pos2]]) -> Option<Vec<Pos2>> {
+fn find_path(
+    start: Pos2,
+    end: Pos2,
+    obstacles: &[Rect],
+    wires: &[&[Pos2]],
+    siblings: &[&[Pos2]],
+) -> Option<Vec<Pos2>> {
     let from = start + vec2(STUB, 0.0);
     let to = end - vec2(STUB, 0.0);
     SCRATCH.with_borrow_mut(|scratch| {
-        let grid = Grid::new(from, to, obstacles, wires, &mut scratch.flags)?;
+        let grid = Grid::new(from, to, obstacles, wires, siblings, &mut scratch.flags)?;
         let cells = grid.search(&mut scratch.search)?;
 
         let mut points = vec![start];
@@ -331,6 +342,9 @@ const BLOCKED: u8 = 1;
 const NEAR: u8 = 2;
 /// Grid point flag: on a wire, allowed but costs [`WIRE_COST`].
 const WIRE: u8 = 4;
+/// Grid point flag: on a sibling (a wire from the same output). Free to run along,
+/// but stepping onto it from a point off it costs [`WIRE_COST`].
+const SIBLING: u8 = 8;
 
 /// Buffers reused by every path search on this thread.
 ///
@@ -339,7 +353,7 @@ const WIRE: u8 = 4;
 /// rerouted on every frame of a drag) would cost more than many searches do.
 #[derive(Default)]
 struct Scratch {
-    /// [`BLOCKED`] / [`NEAR`] / [`WIRE`] flags of the current grid's points.
+    /// [`BLOCKED`] / [`NEAR`] / [`WIRE`] / [`SIBLING`] flags of the current grid's points.
     flags: Vec<u8>,
     search: SearchBuffers,
 }
@@ -433,7 +447,7 @@ struct Grid<'a> {
     min: (i32, i32),
     columns: usize,
     rows: usize,
-    /// [`BLOCKED`] / [`NEAR`] / [`WIRE`] flags per grid point.
+    /// [`BLOCKED`] / [`NEAR`] / [`WIRE`] / [`SIBLING`] flags per grid point.
     flags: &'a mut [u8],
     goal: (i32, i32),
 }
@@ -446,6 +460,7 @@ impl<'a> Grid<'a> {
         to: Pos2,
         obstacles: &[Rect],
         wires: &[&[Pos2]],
+        siblings: &[&[Pos2]],
         flags: &'a mut Vec<u8>,
     ) -> Option<Self> {
         let delta = to - from;
@@ -468,6 +483,12 @@ impl<'a> Grid<'a> {
         let floor = from.min(to).min(Pos2::ZERO);
         let lo = (from.min(to) - Vec2::splat(SEARCH_MARGIN)).max(floor);
         let hi = from.max(to) + Vec2::splat(SEARCH_MARGIN);
+        // Size check in floats first: for ends very far apart the integer cell
+        // counts below would saturate and overflow.
+        let span = (hi - lo) / cell + Vec2::splat(2.0);
+        if span.x * span.y > MAX_CELLS as f32 {
+            return None;
+        }
         let min = (
             ((lo.x - from.x) / cell.x).floor() as i32,
             ((lo.y - from.y) / cell.y).floor() as i32,
@@ -497,11 +518,14 @@ impl<'a> Grid<'a> {
             grid.mark_rect(obstacle.expand(CLEARANCE), NEAR);
             grid.mark_rect(obstacle.expand(MIN_CLEARANCE), BLOCKED);
         }
-        grid.mark_wires(wires);
+        grid.mark_wires(wires, WIRE);
+        grid.mark_wires(siblings, SIBLING);
         // The stub ends sit right next to their nodes; they must stay reachable.
+        // The output's stub end is on every sibling's stub too: keeping that flag
+        // lets a path follow a sibling from the start for free.
         for end in [(0, 0), goal] {
             if let Some(index) = grid.index(end) {
-                grid.flags[index] = 0;
+                grid.flags[index] &= SIBLING;
             }
         }
         Some(grid)
@@ -511,10 +535,10 @@ impl<'a> Grid<'a> {
         self.flags[index] & flag != 0
     }
 
-    /// Marks the grid points nearest to `wires`. Samples every half cell, so the
-    /// marked points of a wire are 8-connected and a path moving in steps of one
-    /// cell can't slip through a diagonal wire without stepping on it.
-    fn mark_wires(&mut self, wires: &[&[Pos2]]) {
+    /// Sets `flag` on the grid points nearest to `wires`. Samples every half cell,
+    /// so the marked points of a wire are 8-connected and a path moving in steps of
+    /// one cell can't slip through a diagonal wire without stepping on it.
+    fn mark_wires(&mut self, wires: &[&[Pos2]], flag: u8) {
         let spacing = self.cell.x.min(self.cell.y) * 0.5;
         for segment in wires.iter().flat_map(|wire| wire.windows(2)) {
             let samples = (segment[0].distance(segment[1]) / spacing).ceil().max(1.0) as usize;
@@ -525,7 +549,7 @@ impl<'a> Grid<'a> {
                     ((point.y - self.origin.y) / self.cell.y).round() as i32,
                 );
                 if let Some(index) = self.index(cell) {
-                    self.flags[index] |= WIRE;
+                    self.flags[index] |= flag;
                 }
             }
         }
@@ -644,7 +668,11 @@ impl<'a> Grid<'a> {
                 if self.is(next_index, NEAR) {
                     step += NEAR_COST;
                 }
-                if self.is(next_index, WIRE) {
+                // Stepping onto a sibling from off it crosses (or joins) it; moving
+                // along one doesn't count.
+                if self.is(next_index, WIRE)
+                    || (self.is(next_index, SIBLING) && !self.is(index, SIBLING))
+                {
                     step += WIRE_COST;
                 }
                 let next = state(next_index, next_direction);
@@ -712,20 +740,40 @@ mod tests {
     /// Whether any point along the polyline is strictly inside `rect`.
     fn path_hits(points: &[Pos2], rect: Rect) -> bool {
         points.windows(2).any(|segment| {
-            (0..=20).any(|k| {
-                let point = segment[0].lerp(segment[1], k as f32 / 20.0);
-                point.x > rect.min.x
-                    && point.x < rect.max.x
-                    && point.y > rect.min.y
-                    && point.y < rect.max.y
-            })
+            (0..=20).any(|k| strictly_inside(segment[0].lerp(segment[1], k as f32 / 20.0), rect))
         })
+    }
+
+    /// Whether every segment is horizontal or vertical.
+    fn orthogonal(points: &[Pos2]) -> bool {
+        points
+            .windows(2)
+            .all(|s| s[0].x == s[1].x || s[0].y == s[1].y)
     }
 
     #[test]
     fn clear_connections_stay_curves() {
         let (a, b) = (node(0.0, 0.0), node(400.0, 0.0));
-        let route = route(pos2(160.0, 45.0), pos2(400.0, 45.0), &[a, b], &[], 20.0);
+        let route = route(
+            pos2(160.0, 45.0),
+            pos2(400.0, 45.0),
+            &[a, b],
+            &[],
+            &[],
+            20.0,
+        );
+        assert!(matches!(route, Route::Curve(_)));
+    }
+
+    #[test]
+    fn ends_too_far_apart_to_search_keep_the_curve() {
+        // A node in the way forces a search, but the area is far too big for it
+        // (and its cell counts would overflow `i32`).
+        let (start, end) = (pos2(160.0, 45.0), pos2(1e12, 1e12));
+        let blocker = Rect::from_center_size(start.lerp(end, 0.5), vec2(1e11, 1e11));
+
+        let route = route(start, end, &[blocker], &[], &[], 20.0);
+
         assert!(matches!(route, Route::Curve(_)));
     }
 
@@ -734,29 +782,17 @@ mod tests {
         let (a, blocker, b) = (node(0.0, 0.0), node(250.0, 0.0), node(500.0, 0.0));
         let (start, end) = (pos2(160.0, 45.0), pos2(500.0, 45.0));
 
-        let Route::Path(points) = route(start, end, &[a, blocker, b], &[], 20.0) else {
+        let Route::Path(points) = route(start, end, &[a, blocker, b], &[], &[], 20.0) else {
             panic!("expected a routed path");
         };
 
         assert_eq!(points.first(), Some(&start));
         assert_eq!(points.last(), Some(&end));
         assert!(!path_hits(&points, blocker));
-        // Orthogonal: every segment is horizontal or vertical.
-        assert!(
-            points
-                .windows(2)
-                .all(|s| s[0].x == s[1].x || s[0].y == s[1].y)
-        );
+        assert!(orthogonal(&points));
         // Leaves rightwards and enters from the left.
         assert!(points[1].x > start.x && points[1].y == start.y);
         assert!(points[points.len() - 2].x < end.x);
-    }
-
-    /// Whether every segment is horizontal or vertical.
-    fn orthogonal(points: &[Pos2]) -> bool {
-        points
-            .windows(2)
-            .all(|s| s[0].x == s[1].x || s[0].y == s[1].y)
     }
 
     #[test]
@@ -768,7 +804,8 @@ mod tests {
         let (blocker, b) = (node(400.0, 0.0), node(600.0, 0.0));
         let nodes = [a, above, below, blocker, b];
 
-        let Route::Path(points) = route(pos2(160.0, 45.0), pos2(600.0, 45.0), &nodes, &[], 20.0)
+        let Route::Path(points) =
+            route(pos2(160.0, 45.0), pos2(600.0, 45.0), &nodes, &[], &[], 20.0)
         else {
             panic!("expected a routed path");
         };
@@ -783,7 +820,7 @@ mod tests {
         let (a, blocker, b) = (node(0.0, 0.0), node(250.0, 0.0), node(500.0, 3.0));
         let (start, end) = (pos2(160.0, 45.0), pos2(500.0, 48.0));
 
-        let Route::Path(points) = route(start, end, &[a, blocker, b], &[], 20.0) else {
+        let Route::Path(points) = route(start, end, &[a, blocker, b], &[], &[], 20.0) else {
             panic!("expected a routed path");
         };
 
@@ -811,12 +848,13 @@ mod tests {
             pos2(area.max.x + 1.0, area.min.y),
             pos2(area.max.x + 1.0, area.max.y),
         ];
-        let near_only = route(start, end, &[a, blocker, b], &[], 20.0);
+        let near_only = route(start, end, &[a, blocker, b], &[], &[], 20.0);
         let with_far = route(
             start,
             end,
             &[a, blocker, b, far[0], far[1], far[2]],
             &[&far_wire],
+            &[],
             20.0,
         );
 
@@ -837,7 +875,7 @@ mod tests {
 
     /// Routes `connections` (output, input, source ID) one after another the way the
     /// canvas does: each against the earlier routes and the stubs of all the others,
-    /// leaving out wires from the same source.
+    /// with earlier routes from the same source as siblings.
     fn route_all(connections: &[(Pos2, Pos2, usize)], nodes: &[Rect]) -> Vec<Vec<Pos2>> {
         let mut routed: Vec<Vec<Pos2>> = Vec::new();
         for (index, &(start, end, source)) in connections.iter().enumerate() {
@@ -847,14 +885,15 @@ mod tests {
                 .flat_map(|&(start, end, _)| stubs(start, end))
                 .collect();
             let mut wires: Vec<&[Pos2]> = other_stubs.iter().map(|stub| &stub[..]).collect();
-            wires.extend(
-                routed
-                    .iter()
-                    .zip(connections)
-                    .filter(|(_, (.., other))| *other != source)
-                    .map(|(points, _)| &points[..]),
-            );
-            let route = route(start, end, nodes, &wires, 20.0);
+            let mut siblings: Vec<&[Pos2]> = Vec::new();
+            for (points, (.., other)) in routed.iter().zip(connections) {
+                if *other == source {
+                    siblings.push(points);
+                } else {
+                    wires.push(points);
+                }
+            }
+            let route = route(start, end, nodes, &wires, &siblings, 20.0);
             routed.push(route.polyline());
             assert_eq!(routed.len(), index + 1);
         }
@@ -893,6 +932,33 @@ mod tests {
     }
 
     #[test]
+    fn connections_from_one_output_branch_off_instead_of_crossing() {
+        // One output feeding a node far right, routed below a node in the way, and a
+        // node below and close: its plain curve would cut across the first route.
+        let source = node(0.0, 0.0);
+        let blocker = node(260.0, 0.0);
+        let (far, near) = (node(520.0, 110.0), node(270.0, 220.0));
+        let start = pos2(160.0, 30.0);
+        let connections = [
+            (start, pos2(520.0, 140.0), 0),
+            (start, pos2(270.0, 250.0), 0),
+        ];
+        let nodes = [source, blocker, far, near];
+        let curve = sample(&bezier(connections[1].0, connections[1].1, 20.0));
+
+        let routes = route_all(&connections, &nodes);
+
+        assert!(
+            crossings(&curve, &[&routes[0]]) > 0,
+            "the layout must make the curve cross"
+        );
+        assert!(orthogonal(&routes[1]), "{:?}", routes[1]);
+        assert_eq!(crossings(&routes[1], &[&routes[0]]), 0, "{routes:?}");
+        // Branches off the first route's trunk: both leave along the same stretch.
+        assert_eq!(routes[0][..2], routes[1][..2], "{routes:?}");
+    }
+
+    #[test]
     fn unavoidable_crossings_keep_the_curve() {
         // Two sources feeding a node's inputs in reverse order: the wires must cross
         // somewhere, so the second connection stays a plain curve.
@@ -922,7 +988,7 @@ mod tests {
             Rect::from_min_max(pos2(840.0, 200.0), pos2(860.0, 500.0)),
         ];
 
-        let route = route(start, end, &boxed, &[], 20.0);
+        let route = route(start, end, &boxed, &[], &[], 20.0);
 
         assert_eq!(route, Route::Curve(bezier(start, end, 20.0)));
     }
@@ -931,7 +997,7 @@ mod tests {
     fn still_clear_until_a_node_moves_into_the_route() {
         let (a, blocker, b) = (node(0.0, 0.0), node(250.0, 0.0), node(500.0, 0.0));
         let (start, end) = (pos2(160.0, 45.0), pos2(500.0, 45.0));
-        let path = route(start, end, &[a, blocker, b], &[], 20.0);
+        let path = route(start, end, &[a, blocker, b], &[], &[], 20.0);
         assert!(matches!(path, Route::Path(_)));
         let curve = Route::Curve(bezier(start, end, 20.0));
 
@@ -960,7 +1026,7 @@ mod tests {
         let (a, b) = (node(400.0, 200.0), node(0.0, 200.0));
         let (start, end) = (pos2(560.0, 245.0), pos2(0.0, 245.0));
 
-        let Route::Path(points) = route(start, end, &[a, b], &[], 20.0) else {
+        let Route::Path(points) = route(start, end, &[a, b], &[], &[], 20.0) else {
             panic!("expected a routed path");
         };
 

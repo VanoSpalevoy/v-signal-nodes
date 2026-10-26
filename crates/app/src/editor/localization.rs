@@ -9,6 +9,8 @@
 //! Node text is not here: it comes from the plugins, which ship their own
 //! translations in the node specs, looked up by [`Language::code`].
 
+use v_signal_nodes_core::SocketDirection;
+
 /// A UI language.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Language {
@@ -31,11 +33,33 @@ pub(super) enum Text {
     DeleteNode,
     NodeLimitReached,
     ConnectionCreatesCycle,
+    ConnectionIncompatible,
     SnapToGrid,
     Scale,
+    // Menu bar titles and commands (see `commands`).
+    MenuEdit,
+    MenuView,
+    MenuRun,
+    Copy,
+    Paste,
+    ZoomIn,
+    ZoomOut,
+    ResetZoom,
+    RunRealtime,
+    RunAsync,
     // Toggle parameter values, the same for every plugin.
     On,
     Off,
+}
+
+impl From<SocketDirection> for Text {
+    /// "Input"/"Output", the name of a socket side.
+    fn from(direction: SocketDirection) -> Self {
+        match direction {
+            SocketDirection::Input => Self::Input,
+            SocketDirection::Output => Self::Output,
+        }
+    }
 }
 
 impl Language {
@@ -75,8 +99,21 @@ impl Language {
             (Self::English, Text::ConnectionCreatesCycle) => {
                 "Connection refused: it would create a cycle"
             }
+            (Self::English, Text::ConnectionIncompatible) => {
+                "Connection refused: the sockets don't fit (rate or channels)"
+            }
             (Self::English, Text::SnapToGrid) => "Snap to grid",
             (Self::English, Text::Scale) => "Scale",
+            (Self::English, Text::MenuEdit) => "Edit",
+            (Self::English, Text::MenuView) => "View",
+            (Self::English, Text::MenuRun) => "Run",
+            (Self::English, Text::Copy) => "Copy",
+            (Self::English, Text::Paste) => "Paste",
+            (Self::English, Text::ZoomIn) => "Zoom in",
+            (Self::English, Text::ZoomOut) => "Zoom out",
+            (Self::English, Text::ResetZoom) => "Actual size",
+            (Self::English, Text::RunRealtime) => "Run in real time",
+            (Self::English, Text::RunAsync) => "Run once (async)",
             (Self::English, Text::On) => "on",
             (Self::English, Text::Off) => "off",
             (Self::Russian, Text::Language) => "Язык",
@@ -93,8 +130,21 @@ impl Language {
             (Self::Russian, Text::ConnectionCreatesCycle) => {
                 "Соединение отклонено: образуется цикл"
             }
+            (Self::Russian, Text::ConnectionIncompatible) => {
+                "Соединение отклонено: сокеты несовместимы (частота или каналы)"
+            }
             (Self::Russian, Text::SnapToGrid) => "Привязать к сетке",
             (Self::Russian, Text::Scale) => "Масштаб",
+            (Self::Russian, Text::MenuEdit) => "Правка",
+            (Self::Russian, Text::MenuView) => "Вид",
+            (Self::Russian, Text::MenuRun) => "Запуск",
+            (Self::Russian, Text::Copy) => "Копировать",
+            (Self::Russian, Text::Paste) => "Вставить",
+            (Self::Russian, Text::ZoomIn) => "Увеличить",
+            (Self::Russian, Text::ZoomOut) => "Уменьшить",
+            (Self::Russian, Text::ResetZoom) => "Реальный размер",
+            (Self::Russian, Text::RunRealtime) => "Запуск в реальном времени",
+            (Self::Russian, Text::RunAsync) => "Однократный запуск (асинхронно)",
             (Self::Russian, Text::On) => "вкл",
             (Self::Russian, Text::Off) => "выкл",
         }

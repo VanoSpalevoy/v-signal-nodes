@@ -11,10 +11,16 @@ path = "src/main.rs"
 [dependencies]
 egui.workspace = true
 eframe.workspace = true
-v-signal-nodes-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+v-signal-nodes-core = { workspace = true, features = ["serde"] }
 v-signal-nodes-plugin-host.workspace = true
 v-signal-nodes-plugin-std.workspace = true
 v-signal-nodes-plugin-stub.workspace = true
+
+# The native menu bar at the top of the screen (`editor::native_menu`).
+[target.'cfg(target_os = "macos")'.dependencies]
+muda.workspace = true
 
 [lints]
 workspace = true

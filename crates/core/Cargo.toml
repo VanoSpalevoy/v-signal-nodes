@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+# Serde support for the value types saved in documents (`ParamValue`).
+serde = ["dep:serde"]
 
 [lints]
 workspace = true

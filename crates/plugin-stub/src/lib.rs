@@ -6,8 +6,8 @@
 //! output silent.
 
 use v_signal_nodes_plugin_api::{
-    NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, ParamSpec, Plugin, PluginError,
-    ProcessIo, Registrar, TextKey,
+    ChoiceParam, NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, NumberParam,
+    ParamKey, Plugin, PluginError, ProcessIo, Registrar, Rgb, TextKey, ToggleParam,
 };
 
 /// Type id of the stub node.
@@ -21,34 +21,44 @@ impl Plugin for StubPlugin {
         "stub"
     }
 
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     fn register(&self, registrar: &mut dyn Registrar) {
         registrar.register_node(Box::new(StubNode));
     }
 }
 
 /// [`STUB_NODE`]: one input, one output and one parameter of each kind, so the
-/// editor has every kind of label to show.
+/// editor has every kind of label to show. Gray, its own color, so it doesn't
+/// pass for a real processor.
 struct StubNode;
+
+const LEVEL: NumberParam = NumberParam("level");
+const MODE: ChoiceParam = ChoiceParam("mode");
+const BYPASS: ToggleParam = ToggleParam("bypass");
 
 impl NodeProvider for StubNode {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(STUB_NODE, "Stub", NodeKind::Processor)
+            .color(Rgb::new(160, 164, 172))
             .input(NodeSocket::audio_in("In"))
             .output(NodeSocket::audio_out("Out"))
-            .param(ParamSpec::number("level", "Level", 0.0, 1.0, 0.5))
-            .param(ParamSpec::choice("mode", "Mode", ["idle", "busy"], 0))
-            .param(ParamSpec::toggle("bypass", "Bypass", true))
+            .param(LEVEL.spec("Level", 0.0, 1.0, 0.5))
+            .param(MODE.spec("Mode", ["idle", "busy"], 0))
+            .param(BYPASS.spec("Bypass", true))
             .translate(
                 "ru",
                 [
                     (TextKey::Name, "Заглушка"),
                     (TextKey::Input(0), "Вход"),
                     (TextKey::Output(0), "Выход"),
-                    (TextKey::param("level"), "Уровень"),
-                    (TextKey::param("mode"), "Режим"),
-                    (TextKey::option("mode", 0), "простой"),
-                    (TextKey::option("mode", 1), "занят"),
-                    (TextKey::param("bypass"), "Обход"),
+                    (LEVEL.name_key(), "Уровень"),
+                    (MODE.name_key(), "Режим"),
+                    (MODE.option_key(0), "простой"),
+                    (MODE.option_key(1), "занят"),
+                    (BYPASS.name_key(), "Обход"),
                 ],
             )
     }

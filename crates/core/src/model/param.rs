@@ -1,6 +1,23 @@
 //! Node parameters: declared by a [`NodeSpec`](super::NodeSpec), stored per node.
+//!
+//! A plugin declares each parameter once as a typed key constant
+//! ([`NumberParam`], [`ChoiceParam`], [`ToggleParam`]) and builds both the
+//! parameter's [`ParamSpec`] and its reads in `process` from it, so the two can't
+//! disagree on the id or the kind:
+//!
+//! ```
+//! use v_signal_nodes_core::{NumberParam, ParamKey, ParamValue};
+//!
+//! const GAIN: NumberParam = NumberParam("gain");
+//!
+//! let spec = GAIN.spec("Gain", 0.0, 2.0, 1.0);
+//! assert_eq!(spec.id, "gain");
+//! assert_eq!(GAIN.read(spec.default_value()), Some(1.0));
+//! assert_eq!(GAIN.read(ParamValue::Toggle(true)), None);
+//! ```
 
 use crate::AppError;
+use crate::model::TextKey;
 
 /// What values a parameter takes, with its default.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,8 +46,14 @@ pub struct ParamSpec {
 /// Current value of a parameter.
 ///
 /// Not part of the C ABI: dynamically loaded plugins get values as
-/// `plugin-api`'s `ffi::FfiParamValue`.
+/// `plugin-api`'s `ffi::FfiParamValue`. With the `serde` feature it serializes as
+/// `{"number": 1.0}`, `{"choice": 0}` or `{"toggle": true}`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum ParamValue {
     Number(f32),
     /// Index into [`ParamKind::Choice::options`].
@@ -61,6 +84,102 @@ impl ParamValue {
             Self::Toggle(on) => Some(on),
             _ => None,
         }
+    }
+}
+
+/// A typed parameter key: the parameter's id plus the type of its value.
+pub trait ParamKey: Copy {
+    /// What reading the parameter gives.
+    type Value;
+
+    /// The parameter's [`id`](ParamSpec::id).
+    fn id(self) -> &'static str;
+
+    /// `value` as this key's type, or `None` if it's another kind of value.
+    fn read(self, value: ParamValue) -> Option<Self::Value>;
+
+    /// The [`TextKey`] of the parameter's name, for translations.
+    fn name_key(self) -> TextKey {
+        TextKey::param(self.id())
+    }
+}
+
+/// Key of a [`Number`](ParamKind::Number) parameter; reads as `f32`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NumberParam(pub &'static str);
+
+/// Key of a [`Choice`](ParamKind::Choice) parameter; reads as the option index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ChoiceParam(pub &'static str);
+
+/// Key of a [`Toggle`](ParamKind::Toggle) parameter; reads as `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ToggleParam(pub &'static str);
+
+impl NumberParam {
+    /// The spec of this parameter: a number in `min..=max`.
+    pub fn spec(self, name: impl Into<String>, min: f32, max: f32, default: f32) -> ParamSpec {
+        ParamSpec::number(self.0, name, min, max, default)
+    }
+}
+
+impl ChoiceParam {
+    /// The spec of this parameter: one of `options`.
+    pub fn spec<S: Into<String>>(
+        self,
+        name: impl Into<String>,
+        options: impl IntoIterator<Item = S>,
+        default: usize,
+    ) -> ParamSpec {
+        ParamSpec::choice(self.0, name, options, default)
+    }
+
+    /// The [`TextKey`] of option `index`, for translations.
+    pub fn option_key(self, index: usize) -> TextKey {
+        TextKey::option(self.0, index)
+    }
+}
+
+impl ToggleParam {
+    /// The spec of this parameter: on or off.
+    pub fn spec(self, name: impl Into<String>, default: bool) -> ParamSpec {
+        ParamSpec::toggle(self.0, name, default)
+    }
+}
+
+impl ParamKey for NumberParam {
+    type Value = f32;
+
+    fn id(self) -> &'static str {
+        self.0
+    }
+
+    fn read(self, value: ParamValue) -> Option<f32> {
+        value.as_number()
+    }
+}
+
+impl ParamKey for ChoiceParam {
+    type Value = usize;
+
+    fn id(self) -> &'static str {
+        self.0
+    }
+
+    fn read(self, value: ParamValue) -> Option<usize> {
+        value.as_choice()
+    }
+}
+
+impl ParamKey for ToggleParam {
+    type Value = bool;
+
+    fn id(self) -> &'static str {
+        self.0
+    }
+
+    fn read(self, value: ParamValue) -> Option<bool> {
+        value.as_toggle()
     }
 }
 
@@ -166,6 +285,26 @@ mod tests {
         let mode = ParamSpec::choice("mode", "Mode", ["a", "b"], 1);
         assert_eq!(mode.default_value(), ParamValue::Choice(1));
         assert!(!mode.accepts(ParamValue::Choice(2)));
+    }
+
+    #[test]
+    fn keys_build_specs_and_read_their_kind() {
+        const MODE: ChoiceParam = ChoiceParam("mode");
+        const ON: ToggleParam = ToggleParam("on");
+
+        assert_eq!(
+            MODE.spec("Mode", ["a", "b"], 1),
+            ParamSpec::choice("mode", "Mode", ["a", "b"], 1)
+        );
+        assert_eq!(MODE.read(ParamValue::Choice(1)), Some(1));
+        assert_eq!(MODE.read(ParamValue::Number(1.0)), None);
+        assert_eq!(MODE.option_key(1), TextKey::option("mode", 1));
+        assert_eq!(
+            ON.spec("On", true).default_value(),
+            ParamValue::Toggle(true)
+        );
+        assert_eq!(ON.read(ParamValue::Toggle(false)), Some(false));
+        assert_eq!(ON.name_key(), TextKey::param("on"));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod document;
 mod editor;
 
 fn main() -> eframe::Result {

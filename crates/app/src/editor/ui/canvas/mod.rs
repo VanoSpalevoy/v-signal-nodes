@@ -54,11 +54,12 @@
 //! | drop a palette button on the canvas     | add a node centered on the pointer              |
 //! | click a palette button                  | add a node in the middle of the visible area    |
 //!
-//! Clicking an input always clears the selection. The connection itself goes
-//! through `VSignalNodesApp::connect`, which refuses edges that would create a cycle
-//! (including a node feeding itself) and flags that for the debug panel.
-//! Disconnecting goes through `VSignalNodesApp::disconnect_input` / `disconnect_output`,
-//! moving through `VSignalNodesApp::begin_drag` / `drag_to` / `end_drag` / `cancel_drag`.
+//! Clicking an input always clears the selection. Every effect is a
+//! `VSignalNodesApp` call: selecting goes through `select_source` / `clear_selection`,
+//! connecting through `connect_pending` (→ `connect`, which refuses edges that
+//! would create a cycle, including a node feeding itself, and flags that for the
+//! debug panel), disconnecting through `disconnect_input` / `disconnect_output`,
+//! moving through `begin_drag` / `drag_to` / `end_drag` / `cancel_drag`.
 //!
 //! Feedback: while a node is dragged, ghosts show where nodes will be once it is
 //! dropped; the pending source gets an accent ring and a curve that follows the
@@ -90,9 +91,10 @@ mod paint;
 use eframe::egui;
 
 use super::placement::NODE_GAP;
-use super::{NodeConfig, NodeKind, place_new_node};
-use crate::editor::{NodeWidget, SocketKind, SocketRef, VSignalNodesApp};
+use super::{NodeKind, node_size, place_new_node};
+use crate::editor::{NodeWidget, SocketRef, VSignalNodesApp};
 pub(in crate::editor) use connections::RouteCache;
+use v_signal_nodes_core::{NodeId, SocketDirection};
 
 /// Height of the tinted header band holding the title and the delete button.
 const HEADER_HEIGHT: f32 = 28.0;
@@ -133,13 +135,18 @@ impl View {
     fn to_canvas(self, screen: egui::Pos2) -> egui::Pos2 {
         ((screen.to_vec2() - self.origin) / self.scale).to_pos2()
     }
+
+    /// The proportional font of `size` canvas units.
+    fn font(self, size: f32) -> egui::FontId {
+        egui::FontId::proportional(self.len(size))
+    }
 }
 
 /// What the pointer is over after interaction, for hover feedback when painting.
 #[derive(Default)]
 struct Hovered {
     socket: Option<SocketRef>,
-    delete_button: Option<usize>,
+    delete_button: Option<NodeId>,
 }
 
 /// The scroll state of the last frame, to keep the view centered across zoom changes.
@@ -197,7 +204,7 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
 fn show_content(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
     let viewport = ui.clip_rect();
     let (canvas_rect, background) = ui.allocate_exact_size(
-        content_size(&app.nodes, app.scale, viewport.size()),
+        content_size(&app.node_rects(), app.scale, viewport.size()),
         egui::Sense::click(),
     );
     let view = View {
@@ -211,7 +218,7 @@ fn show_content(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
 
     let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
     if background.clicked() || escape {
-        app.pending_source = None;
+        app.clear_selection();
     }
     if escape {
         app.cancel_drag();
@@ -220,44 +227,52 @@ fn show_content(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
     interaction::finish_palette_drop(app, ui, view, pointer);
     let hovered = interaction::handle_node_interactions(app, ui, view, viewport);
 
-    let update = app
-        .routes
-        .update(&app.nodes, &app.connections, connections::ROUTING_BUDGET);
+    // Taken out while the nodes (borrowing the whole app) are looked at.
+    let mut routes = std::mem::take(&mut app.routes);
+    let nodes: Vec<_> = app.nodes().collect();
+    let update = routes.update(&nodes, &app.graph, connections::ROUTING_BUDGET);
+    app.routes = routes;
     if update.deferred > 0 {
         ui.ctx().request_repaint();
     }
     paint::paint(app, ui, view, viewport, &hovered, pointer);
 }
 
-/// Content fills at least the viewport and grows to fit every node plus a margin.
-fn content_size(nodes: &[NodeWidget], scale: f32, viewport: egui::Vec2) -> egui::Vec2 {
-    let extent = nodes.iter().fold(egui::Vec2::ZERO, |extent, node| {
-        extent.max(node.rect().max.to_vec2() + egui::Vec2::splat(CANVAS_MARGIN))
+/// Content fills at least the viewport and grows to fit every node (`rects`) plus
+/// a margin.
+fn content_size(rects: &[egui::Rect], scale: f32, viewport: egui::Vec2) -> egui::Vec2 {
+    let extent = rects.iter().fold(egui::Vec2::ZERO, |extent, rect| {
+        extent.max(rect.max.to_vec2() + egui::Vec2::splat(CANVAS_MARGIN))
     });
     (extent * scale).max(viewport)
 }
 
-/// Canvas rect of a node of `kind` dropped at screen `pointer`: centered on it, kept off negative coordinates.
-///
-/// Moved to the nearest free spot if that would overlap a node, exactly as
-/// `add_node_at` will place it, so the preview shows the real landing spot.
-fn drop_rect(kind: &NodeKind, pointer: egui::Pos2, view: View, nodes: &[NodeWidget]) -> egui::Rect {
-    let config = NodeConfig::for_kind(kind);
-    let size = config.size();
-    let pos = place_new_node(nodes, &config, view.to_canvas(pointer) - size * 0.5);
+/// Top-left corner (canvas coordinates) that centers a node of `kind` on `center`:
+/// where palette clicks and drops ask `add_node_at` to put a node.
+fn centered_on(kind: &NodeKind, center: egui::Pos2) -> egui::Pos2 {
+    center - node_size(kind.spec()) * 0.5
+}
+
+/// Canvas rect of a node of `kind` dropped at screen `pointer`: centered on it, or
+/// at the nearest free spot among the nodes at `rects`, exactly as `add_node_at`
+/// will place it, so the preview shows the real landing spot.
+fn drop_rect(kind: &NodeKind, pointer: egui::Pos2, view: View, rects: &[egui::Rect]) -> egui::Rect {
+    let size = node_size(kind.spec());
+    let pos = place_new_node(rects, size, centered_on(kind, view.to_canvas(pointer)));
     egui::Rect::from_min_size(pos, size)
 }
 
 /// A socket's hit area on screen: a [`SOCKET_HIT_SIZE`] square centered on the
 /// socket, but reaching at most half of [`NODE_GAP`] outside the node, so the
 /// hit areas of two nodes facing each other across the gap never overlap.
-fn socket_rect(node: &NodeWidget, side: SocketKind, index: usize, view: View) -> egui::Rect {
-    let center = node.socket_pos(side, index);
+fn socket_rect(node: &NodeWidget, socket: SocketRef, view: View) -> egui::Rect {
+    let side = socket.side();
+    let center = node.socket_pos(side, socket.index());
     let half = SOCKET_HIT_SIZE * 0.5;
     let outside = half.min(NODE_GAP * 0.5);
     let (left, right) = match side {
-        SocketKind::Input => (outside, half),
-        SocketKind::Output => (half, outside),
+        SocketDirection::Input => (outside, half),
+        SocketDirection::Output => (half, outside),
     };
     view.rect(egui::Rect::from_min_max(
         egui::pos2(center.x - left, center.y - half),

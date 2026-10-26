@@ -43,9 +43,10 @@ knows no node types and grows without changes to its code.
   orthogonal grid, with rounded corners) and drawn with a color gradient from
   the source node to the target. Only routes near a moved node are recomputed,
   so large graphs stay smooth.
-- **A graph that stays valid.** Cycles and self-connections are refused, each
-  input has at most one source, and the bottom panel shows why a connection was
-  refused.
+- **A graph that stays valid.** Cycles, self-connections and sockets that don't
+  fit (different rates, or channel counts that differ with neither side mono)
+  are refused, each input has at most one source, and the bottom panel shows why
+  a connection was refused.
 - **Plugins.** Rust crates linked into the editor, or dynamic libraries loaded
   through a C ABI, with an API version check and panics caught at the boundary.
 - **Two languages.** An English or Russian interface. Plugins translate their
@@ -109,12 +110,12 @@ flowchart LR
 | Crate                 | What it is                                                     |
 |-----------------------|----------------------------------------------------------------|
 | `crates/app`          | The egui/eframe editor                                         |
-| `crates/core`         | Node model: node specs, parameters, sockets, translations; no dependencies |
+| `crates/core`         | Node model and graph: node specs, parameters, sockets, translations, connection rules; no dependencies |
 | `crates/plugin-api`   | The plugin contract and its C ABI (`ffi`)                      |
 | `crates/plugin-host`  | Loads plugins (linked or from a dynamic library) and builds nodes |
 | `crates/plugin-std`   | The standard nodes (`std.*`), the reference plugin            |
 | `crates/plugin-stub`  | A do-nothing node used to test the plugin → editor path       |
-| `crates/runtime`      | Graph processing; a placeholder for now                        |
+| `crates/runtime`      | Graph processing: runs a compiled plan block by block; early skeleton |
 
 API docs: `cargo doc --workspace --no-deps --open`.
 
@@ -135,10 +136,17 @@ impl Plugin for MyPlugin {
         "my"
     }
 
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     fn register(&self, registrar: &mut dyn Registrar) {
         registrar.register_node(Box::new(Invert));
     }
 }
+
+/// Declared once: the spec and `process` both use it.
+const ENABLED: ToggleParam = ToggleParam("enabled");
 
 struct Invert;
 
@@ -147,14 +155,14 @@ impl NodeProvider for Invert {
         NodeSpec::new("my.invert", "Invert", NodeKind::Processor)
             .input(NodeSocket::audio_in("In"))
             .output(NodeSocket::audio_out("Out"))
-            .param(ParamSpec::toggle("enabled", "Enabled", true))
+            .param(ENABLED.spec("Enabled", true))
             .translate(
                 "ru",
                 [
                     (TextKey::Name, "Инверсия"),
                     (TextKey::Input(0), "Вход"),
                     (TextKey::Output(0), "Выход"),
-                    (TextKey::param("enabled"), "Включено"),
+                    (ENABLED.name_key(), "Включено"),
                 ],
             )
     }
@@ -168,7 +176,7 @@ struct InvertProcessor;
 
 impl NodeProcessor for InvertProcessor {
     fn process(&mut self, io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
-        let sign = if io.toggle(0) { -1.0 } else { 1.0 };
+        let sign = if io.get(ENABLED)? { -1.0 } else { 1.0 };
         let input = io.input(0);
         for (out, sample) in io.output(0).iter_mut().zip(input) {
             *out = sample * sign;
@@ -185,8 +193,17 @@ export_plugin!(MyPlugin);
 
 - **Type ids** are namespaced by the plugin, for example `my.invert`, and must
   be unique across all loaded plugins.
-- **Roles and sockets must match:** a `Generator` has outputs only, a
-  `Processor` has inputs and outputs, and an `Output` has inputs only.
+- **Roles and sockets must match:** a `Generator` needs an output (it may also
+  take modulation inputs), a `Processor` needs inputs and outputs, and an
+  `Output` needs an input. The role picks the palette group and the default
+  color; `NodeSpec::color` sets a color of its own.
+- **Sockets** carry a rate (`SignalRate::Audio`: a value per sample;
+  `SignalRate::Control`: one value per block) and a channel count
+  (`with_channels`, mono by default). A socket's buffer holds its channels one
+  after another; `ProcessIo::input_channels` / `output_channels` split it.
+- **Parameters** are declared as key constants (`NumberParam`, `ChoiceParam`,
+  `ToggleParam`) that build the `ParamSpec` and read the value with
+  `io.get(KEY)`, so the id and kind can't drift apart.
 - **Labels are written in English in the spec.** Translations are keyed by
   `TextKey`: the node name, a socket by index, a parameter by id, or a choice
   option by parameter id and index. That way, renaming the English label keeps
@@ -217,7 +234,7 @@ already load a dynamic library, but the editor doesn't call it yet.
 - [x] Plugin API: linked plugins and a C ABI
 - [x] Localized interface and node labels
 - [x] CI on Linux, macOS and Windows
-- [ ] Graph in `core` with connection checks and generational node ids
+- [x] Graph in `core` with connection checks and generational node ids
 - [ ] Graph runtime: real-time processing and an offline pass
 - [ ] Editing node parameters
 - [ ] Saving and loading graphs, undo and redo

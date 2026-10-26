@@ -1,21 +1,27 @@
 //! The standard plugin: built-in node types (`std.*`).
 //!
-//! | Type id      | Kind      | Inputs            | Outputs   | Parameters                   |
-//! |--------------|-----------|-------------------|-----------|------------------------------|
-//! | `std.source` | Generator | —                 | Audio     | Signal, Frequency            |
-//! | `std.gain`   | Processor | Audio in          | Audio out | Gain                         |
-//! | `std.mixer`  | Processor | Left, Right, Side | Mixed     | Mode, Gain, Pan              |
-//! | `std.sink`   | Output    | Audio             | —         | Channels                     |
+//! | Type id      | Kind      | Inputs            | Outputs          | Parameters        |
+//! |--------------|-----------|-------------------|------------------|-------------------|
+//! | `std.source` | Generator | —                 | Audio            | Signal, Frequency |
+//! | `std.gain`   | Processor | Audio in          | Audio out        | Gain              |
+//! | `std.mixer`  | Processor | Left, Right, Side | Mixed (stereo)   | Mode, Gain, Pan   |
+//! | `std.sink`   | Output    | Audio (stereo)    | —                | —                 |
 //!
-//! Every label is English in the spec, with Russian translations next to it
+//! All sockets are audio rate and mono unless marked stereo. Every label is
+//! English in the spec, with Russian translations next to it
 //! (`NodeSpec::translate`), so the editor needs no strings of its own for these
-//! nodes.
+//! nodes. Parameters are declared once as key constants, used both for the spec
+//! and for reading the values in `process`.
+//!
+//! This is the reference plugin: other plugins will copy from it, so it keeps to
+//! the rules a processor has to follow (sample rate from `prepare`, no
+//! allocations in `process`).
 
 use std::f32::consts::TAU;
 
 use v_signal_nodes_plugin_api::{
-    NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, ParamSpec, Plugin, PluginError,
-    ProcessIo, Registrar, TextKey,
+    ChoiceParam, NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, NumberParam,
+    ParamKey, Plugin, PluginError, ProcessIo, Registrar, TextKey,
 };
 
 /// Type id of the signal generator.
@@ -35,6 +41,10 @@ impl Plugin for StdPlugin {
         "std"
     }
 
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     fn register(&self, registrar: &mut dyn Registrar) {
         registrar.register_node(Box::new(Source));
         registrar.register_node(Box::new(Gain));
@@ -46,32 +56,30 @@ impl Plugin for StdPlugin {
 /// [`SOURCE`]: a periodic waveform at a set frequency.
 struct Source;
 
-/// Options of the source's `signal` parameter, in index order.
+/// The source's waveform; options in index order: [`WAVEFORMS`].
+const SIGNAL: ChoiceParam = ChoiceParam("signal");
+/// Options of [`SIGNAL`].
 const WAVEFORMS: [&str; 4] = ["sine", "square", "saw", "triangle"];
+/// The source's frequency in Hz.
+const FREQUENCY: NumberParam = NumberParam("frequency");
 
 impl NodeProvider for Source {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(SOURCE, "Source", NodeKind::Generator)
             .output(NodeSocket::audio_out("Audio"))
-            .param(ParamSpec::choice("signal", "Signal", WAVEFORMS, 0))
-            .param(ParamSpec::number(
-                "frequency",
-                "Frequency",
-                20.0,
-                20_000.0,
-                440.0,
-            ))
+            .param(SIGNAL.spec("Signal", WAVEFORMS, 0))
+            .param(FREQUENCY.spec("Frequency", 20.0, 20_000.0, 440.0))
             .translate(
                 "ru",
                 [
                     (TextKey::Name, "Источник"),
                     (TextKey::Output(0), "Аудио"),
-                    (TextKey::param("signal"), "Сигнал"),
-                    (TextKey::option("signal", 0), "синус"),
-                    (TextKey::option("signal", 1), "меандр"),
-                    (TextKey::option("signal", 2), "пила"),
-                    (TextKey::option("signal", 3), "треугольник"),
-                    (TextKey::param("frequency"), "Частота"),
+                    (SIGNAL.name_key(), "Сигнал"),
+                    (SIGNAL.option_key(0), "синус"),
+                    (SIGNAL.option_key(1), "меандр"),
+                    (SIGNAL.option_key(2), "пила"),
+                    (SIGNAL.option_key(3), "треугольник"),
+                    (FREQUENCY.name_key(), "Частота"),
                 ],
             )
     }
@@ -110,8 +118,8 @@ impl NodeProcessor for SourceProcessor {
         if self.sample_rate == 0.0 {
             return Err(PluginError::new("not prepared"));
         }
-        let waveform = io.choice(0);
-        let step = io.number(1) / self.sample_rate;
+        let waveform = io.get(SIGNAL)?;
+        let step = io.get(FREQUENCY)? / self.sample_rate;
         for sample in io.output(0) {
             let phase = self.phase;
             *sample = match waveform {
@@ -135,19 +143,22 @@ impl NodeProcessor for SourceProcessor {
 /// [`GAIN`]: multiplies the signal by a factor.
 struct Gain;
 
+/// The gain factor, shared by [`Gain`] and [`Mixer`].
+const GAIN_FACTOR: NumberParam = NumberParam("gain");
+
 impl NodeProvider for Gain {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(GAIN, "Gain", NodeKind::Processor)
             .input(NodeSocket::audio_in("Audio in"))
             .output(NodeSocket::audio_out("Audio out"))
-            .param(ParamSpec::number("gain", "Gain", 0.0, 2.0, 1.0))
+            .param(GAIN_FACTOR.spec("Gain", 0.0, 2.0, 1.0))
             .translate(
                 "ru",
                 [
                     (TextKey::Name, "Усилитель"),
                     (TextKey::Input(0), "Аудио вход"),
                     (TextKey::Output(0), "Аудио выход"),
-                    (TextKey::param("gain"), "Усиление"),
+                    (GAIN_FACTOR.name_key(), "Усиление"),
                 ],
             )
     }
@@ -161,7 +172,7 @@ struct GainProcessor;
 
 impl NodeProcessor for GainProcessor {
     fn process(&mut self, io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
-        let gain = io.number(0);
+        let gain = io.get(GAIN_FACTOR)?;
         let input = io.input(0);
         for (out, sample) in io.output(0).iter_mut().zip(input) {
             *out = sample * gain;
@@ -170,10 +181,17 @@ impl NodeProcessor for GainProcessor {
     }
 }
 
-/// [`MIXER`]: sums its inputs into one output, scaled by `gain`.
+/// [`MIXER`]: mixes three mono inputs into a stereo output, scaled by `gain`.
 ///
-/// The output is a single channel, so `mode` and `pan` are not applied yet.
+/// In stereo mode Left goes to the left channel, Right to the right one, and
+/// Side is panned between them by `pan` (linearly: left, half each, right). In
+/// mono mode all three are summed into both channels.
 struct Mixer;
+
+/// Mono or stereo mixing; options: `mono`, `stereo`.
+const MODE: ChoiceParam = ChoiceParam("mode");
+/// Where the Side input goes in stereo mode; options: `left`, `center`, `right`.
+const PAN: ChoiceParam = ChoiceParam("pan");
 
 impl NodeProvider for Mixer {
     fn spec(&self) -> NodeSpec {
@@ -181,15 +199,10 @@ impl NodeProvider for Mixer {
             .input(NodeSocket::audio_in("Left"))
             .input(NodeSocket::audio_in("Right"))
             .input(NodeSocket::audio_in("Side"))
-            .output(NodeSocket::audio_out("Mixed"))
-            .param(ParamSpec::choice("mode", "Mode", ["mono", "stereo"], 1))
-            .param(ParamSpec::number("gain", "Gain", 0.0, 2.0, 1.0))
-            .param(ParamSpec::choice(
-                "pan",
-                "Pan",
-                ["left", "center", "right"],
-                1,
-            ))
+            .output(NodeSocket::audio_out("Mixed").with_channels(2))
+            .param(MODE.spec("Mode", ["mono", "stereo"], 1))
+            .param(GAIN_FACTOR.spec("Gain", 0.0, 2.0, 1.0))
+            .param(PAN.spec("Pan", ["left", "center", "right"], 1))
             .translate(
                 "ru",
                 [
@@ -198,14 +211,14 @@ impl NodeProvider for Mixer {
                     (TextKey::Input(1), "Правый"),
                     (TextKey::Input(2), "Боковой"),
                     (TextKey::Output(0), "Микс"),
-                    (TextKey::param("mode"), "Режим"),
-                    (TextKey::option("mode", 0), "моно"),
-                    (TextKey::option("mode", 1), "стерео"),
-                    (TextKey::param("gain"), "Усиление"),
-                    (TextKey::param("pan"), "Панорама"),
-                    (TextKey::option("pan", 0), "лево"),
-                    (TextKey::option("pan", 1), "центр"),
-                    (TextKey::option("pan", 2), "право"),
+                    (MODE.name_key(), "Режим"),
+                    (MODE.option_key(0), "моно"),
+                    (MODE.option_key(1), "стерео"),
+                    (GAIN_FACTOR.name_key(), "Усиление"),
+                    (PAN.name_key(), "Панорама"),
+                    (PAN.option_key(0), "лево"),
+                    (PAN.option_key(1), "центр"),
+                    (PAN.option_key(2), "право"),
                 ],
             )
     }
@@ -219,10 +232,31 @@ struct MixerProcessor;
 
 impl NodeProcessor for MixerProcessor {
     fn process(&mut self, io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
-        let gain = io.number(1);
-        let inputs: Vec<&[f32]> = (0..io.input_count()).map(|index| io.input(index)).collect();
-        for (frame, out) in io.output(0).iter_mut().enumerate() {
-            *out = inputs.iter().map(|input| input[frame]).sum::<f32>() * gain;
+        let gain = io.get(GAIN_FACTOR)?;
+        let stereo = io.get(MODE)? == 1;
+        // Share of Side in the right channel.
+        let pan = match io.get(PAN)? {
+            0 => 0.0,
+            1 => 0.5,
+            _ => 1.0,
+        };
+        let (left, right, side) = (io.input(0), io.input(1), io.input(2));
+        let mut channels = io.output_channels(0);
+        let (Some(out_left), Some(out_right)) = (channels.next(), channels.next()) else {
+            // An empty block: nothing to write.
+            return Ok(());
+        };
+        let frames = out_left.iter_mut().zip(out_right.iter_mut());
+        for (frame, (out_left, out_right)) in frames.enumerate() {
+            let (l, r, s) = (left[frame], right[frame], side[frame]);
+            let (mixed_left, mixed_right) = if stereo {
+                (l + s * (1.0 - pan), r + s * pan)
+            } else {
+                let sum = l + r + s;
+                (sum, sum)
+            };
+            *out_left = mixed_left * gain;
+            *out_right = mixed_right * gain;
         }
         Ok(())
     }
@@ -234,22 +268,10 @@ struct Sink;
 impl NodeProvider for Sink {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(SINK, "Sink", NodeKind::Output)
-            .input(NodeSocket::audio_in("Audio"))
-            .param(ParamSpec::choice(
-                "channels",
-                "Channels",
-                ["mono", "stereo"],
-                1,
-            ))
+            .input(NodeSocket::audio_in("Audio").with_channels(2))
             .translate(
                 "ru",
-                [
-                    (TextKey::Name, "Приёмник"),
-                    (TextKey::Input(0), "Аудио"),
-                    (TextKey::param("channels"), "Каналы"),
-                    (TextKey::option("channels", 0), "моно"),
-                    (TextKey::option("channels", 1), "стерео"),
-                ],
+                [(TextKey::Name, "Приёмник"), (TextKey::Input(0), "Аудио")],
             )
     }
 
@@ -270,7 +292,7 @@ impl NodeProcessor for SinkProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use v_signal_nodes_plugin_api::{ParamKind, ParamValue, RawBuffer};
+    use v_signal_nodes_plugin_api::{ParamValue, RawBuffer};
 
     fn providers() -> Vec<Box<dyn NodeProvider>> {
         vec![
@@ -288,30 +310,22 @@ mod tests {
         processor
     }
 
-    /// Every label key of `spec`.
-    fn keys(spec: &NodeSpec) -> Vec<TextKey> {
-        let mut keys = vec![TextKey::Name];
-        keys.extend((0..spec.inputs.len()).map(TextKey::Input));
-        keys.extend((0..spec.outputs.len()).map(TextKey::Output));
-        for param in &spec.params {
-            keys.push(TextKey::param(&param.id));
-            if let ParamKind::Choice { options, .. } = &param.kind {
-                keys.extend((0..options.len()).map(|index| TextKey::option(&param.id, index)));
-            }
-        }
-        keys
-    }
-
-    /// Runs `processor` once over `inputs` and returns its first output (or
-    /// nothing for a node without outputs).
+    /// Runs a processor of `provider` once over `inputs` (one buffer per input
+    /// socket) and returns the buffer of its first output, all channels (empty
+    /// for a node without outputs).
     fn run(
+        provider: &dyn NodeProvider,
         processor: &mut dyn NodeProcessor,
         params: &[ParamValue],
         inputs: &[&[f32]],
-        outputs: usize,
         frames: usize,
-    ) -> Vec<f32> {
-        let mut output_samples = vec![vec![0.0; frames]; outputs];
+    ) -> Result<Vec<f32>, PluginError> {
+        let spec = provider.spec();
+        let mut output_samples: Vec<_> = spec
+            .outputs
+            .iter()
+            .map(|socket| vec![0.0; socket.buffer_len(frames)])
+            .collect();
         let inputs: Vec<_> = inputs
             .iter()
             .map(|samples| RawBuffer::input(samples))
@@ -320,20 +334,12 @@ mod tests {
             .iter_mut()
             .map(|samples| RawBuffer::output(samples))
             .collect();
-        // SAFETY: every buffer is `frames` long, lives for the call, and the
-        // outputs are separate vectors.
-        let mut io = unsafe { ProcessIo::from_raw(frames, params, &inputs, &raw_outputs) };
-        processor.process(&mut io).unwrap();
-        output_samples.into_iter().next().unwrap_or_default()
-    }
-
-    fn defaults(provider: &dyn NodeProvider) -> Vec<ParamValue> {
-        provider
-            .spec()
-            .params
-            .iter()
-            .map(ParamSpec::default_value)
-            .collect()
+        // SAFETY: the tests pass one buffer per input socket, of its length; the
+        // outputs are sized from the spec, live for the call and are separate
+        // vectors.
+        let mut io = unsafe { ProcessIo::from_raw(frames, &spec, params, &inputs, &raw_outputs) };
+        processor.process(&mut io)?;
+        Ok(output_samples.into_iter().next().unwrap_or_default())
     }
 
     #[test]
@@ -341,10 +347,10 @@ mod tests {
         for provider in providers() {
             let spec = provider.spec();
             assert!(spec.validate().is_ok(), "{}", spec.type_id);
-            for key in keys(&spec) {
+            for key in spec.text_keys() {
                 assert_ne!(
-                    spec.label("ru", &key),
-                    spec.label("en", &key),
+                    spec.label("ru", key),
+                    spec.label("en", key),
                     "{} {key:?}",
                     spec.type_id
                 );
@@ -356,26 +362,34 @@ mod tests {
     fn gain_scales_the_input() {
         let mut processor = prepared(&Gain);
         let output = run(
+            &Gain,
             processor.as_mut(),
             &[ParamValue::Number(0.5)],
             &[&[1.0, -2.0]],
-            1,
             2,
         );
-        assert_eq!(output, [0.5, -1.0]);
+        assert_eq!(output.unwrap(), [0.5, -1.0]);
     }
 
     #[test]
-    fn mixer_sums_the_inputs() {
+    fn mixer_mixes_into_stereo() {
         let mut processor = prepared(&Mixer);
-        let output = run(
-            processor.as_mut(),
-            &defaults(&Mixer),
-            &[&[1.0, 0.0], &[0.5, 1.0], &[0.25, -1.0]],
-            1,
-            2,
-        );
-        assert_eq!(output, [1.75, 0.0]);
+        let inputs: [&[f32]; 3] = [&[1.0, 0.0], &[0.5, 1.0], &[0.25, -1.0]];
+        let mut mix = |mode, gain, pan| {
+            let params = [
+                ParamValue::Choice(mode),
+                ParamValue::Number(gain),
+                ParamValue::Choice(pan),
+            ];
+            run(&Mixer, processor.as_mut(), &params, &inputs, 2).unwrap()
+        };
+
+        // Stereo, Side in the center: left channel, then right channel.
+        assert_eq!(mix(1, 1.0, 1), [1.125, -0.5, 0.625, 0.5]);
+        // Side fully right, doubled.
+        assert_eq!(mix(1, 2.0, 2), [2.0, 0.0, 1.5, 0.0]);
+        // Mono: everything in both channels.
+        assert_eq!(mix(0, 1.0, 0), [1.75, 0.0, 1.75, 0.0]);
     }
 
     #[test]
@@ -383,19 +397,14 @@ mod tests {
         // A 1 Hz square at 4 samples per second: two highs, two lows, repeating.
         let params = [ParamValue::Choice(1), ParamValue::Number(1.0)];
         let mut processor = prepared(&Source);
-        assert_eq!(
-            run(processor.as_mut(), &params, &[], 1, 3),
-            [1.0, 1.0, -1.0]
-        );
-        assert_eq!(
-            run(processor.as_mut(), &params, &[], 1, 3),
-            [-1.0, 1.0, 1.0]
-        );
+        let mut block = || run(&Source, processor.as_mut(), &params, &[], 3).unwrap();
+        assert_eq!(block(), [1.0, 1.0, -1.0]);
+        assert_eq!(block(), [-1.0, 1.0, 1.0]);
 
         // `reset` starts the period over.
         processor.reset();
         assert_eq!(
-            run(processor.as_mut(), &params, &[], 1, 3),
+            run(&Source, processor.as_mut(), &params, &[], 3).unwrap(),
             [1.0, 1.0, -1.0]
         );
     }
@@ -405,9 +414,14 @@ mod tests {
         let mut processor = Source.create_processor();
         assert!(processor.prepare(0.0, 16).is_err());
         let params = [ParamValue::Choice(0), ParamValue::Number(1.0)];
-        let outputs = [RawBuffer::output(&mut [0.0])];
-        // SAFETY: one 1-sample output, live for the call.
-        let mut io = unsafe { ProcessIo::from_raw(1, &params, &[], &outputs) };
-        assert!(processor.process(&mut io).is_err());
+        assert!(run(&Source, processor.as_mut(), &params, &[], 1).is_err());
+    }
+
+    #[test]
+    fn wrong_parameter_kinds_are_errors() {
+        let mut processor = prepared(&Gain);
+        let wrong = [ParamValue::Choice(0)];
+        let error = run(&Gain, processor.as_mut(), &wrong, &[&[1.0]], 1).unwrap_err();
+        assert!(error.message().contains("'gain'"), "{error}");
     }
 }

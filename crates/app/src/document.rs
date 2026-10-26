@@ -36,6 +36,11 @@ use v_signal_nodes_core::{AppError, ParamValue};
 /// change and migrate older versions in [`Document::from_json`].
 pub(crate) const FORMAT_VERSION: u32 = 1;
 
+/// Largest node coordinate a document may hold (either sign). Far beyond any
+/// real layout, but small enough for the canvas math in `f32` (grid, routing) to
+/// stay exact to well under a canvas unit.
+const MAX_COORDINATE: f32 = 1_000_000.0;
+
 /// A saved node graph.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -108,8 +113,9 @@ impl Document {
     }
 
     /// Parses a document from JSON. Refuses malformed JSON, unknown fields,
-    /// unsupported format versions and non-finite positions or numbers. Plugins
-    /// and graph rules (known types, sockets, cycles) are checked by the editor.
+    /// unsupported format versions, non-finite positions or numbers and positions
+    /// beyond [`MAX_COORDINATE`]. Plugins and graph rules (known types, sockets,
+    /// cycles) are checked by the editor.
     pub(crate) fn from_json(json: &str) -> Result<Self, AppError> {
         let document: Self = serde_json::from_str(json)
             .map_err(|err| AppError::InvalidInput(format!("not a valid document: {err}")))?;
@@ -130,17 +136,31 @@ impl Document {
                     node.id
                 )));
             }
+            if node
+                .pos
+                .iter()
+                .any(|coordinate| coordinate.abs() > MAX_COORDINATE)
+            {
+                return Err(AppError::InvalidInput(format!(
+                    "node {} is placed beyond {MAX_COORDINATE} canvas units",
+                    node.id
+                )));
+            }
         }
         Ok(document)
     }
 }
 
 /// Writes `document` to `path`, replacing the file there (asking before
-/// overwriting is up to the UI). Writes a temporary file next to it first and
-/// renames it over `path`, so a failed save leaves the old file intact.
+/// overwriting is up to the UI). Writes a temporary file next to it first
+/// (`path` + `.tmp`, so `song.json` → `song.json.tmp`, never touching an
+/// unrelated `song.tmp`) and renames it over `path`, so a failed save leaves the
+/// old file intact.
 pub(crate) fn save_document(document: &Document, path: impl AsRef<Path>) -> Result<(), AppError> {
     let path = path.as_ref();
-    let temp = path.with_extension("tmp");
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".tmp");
+    let temp = std::path::PathBuf::from(temp);
     fs::write(&temp, document.to_json())?;
     fs::rename(&temp, path).inspect_err(|_| {
         let _ = fs::remove_file(&temp);
@@ -251,6 +271,10 @@ mod tests {
                  "nodes": [{ "id": 0, "type_id": "std.gain", "pos": [0, 0],
                              "params": { "gain": { "percent": 5 } } }] }"#,
         );
+        refused(
+            r#"{ "version": 1, "connections": [],
+                 "nodes": [{ "id": 0, "type_id": "std.gain", "pos": [0, -1e9] }] }"#,
+        );
     }
 
     #[test]
@@ -258,11 +282,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("v-signal-nodes-doc-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("graph.json");
+        // Someone else's file that merely shares the stem: must survive the save.
+        let unrelated = path.with_extension("tmp");
+        fs::write(&unrelated, "keep me").unwrap();
         let document = sample();
 
         save_document(&document, &path).unwrap();
         assert_eq!(load_document(&path).unwrap(), document);
-        assert!(!path.with_extension("tmp").exists());
+        assert!(!dir.join("graph.json.tmp").exists());
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep me");
         assert!(matches!(
             load_document(dir.join("missing.json")),
             Err(AppError::Io(_))

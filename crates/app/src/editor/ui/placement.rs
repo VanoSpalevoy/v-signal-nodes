@@ -15,8 +15,6 @@ use std::collections::VecDeque;
 
 use eframe::egui;
 
-use super::{NodeConfig, NodeWidget};
-
 /// Minimum free space between two nodes, in canvas units.
 pub(super) const NODE_GAP: f32 = 10.0;
 /// Grid step used when looking for a free spot for a new node.
@@ -213,15 +211,15 @@ fn all_but(rects: &[egui::Rect], index: usize) -> Vec<egui::Rect> {
         .collect()
 }
 
-/// Where a new node with `config` wanted at `wanted` actually goes: the nearest
-/// spot (on a [`PLACEMENT_STEP`] grid around `wanted`) that keeps clear of `nodes`.
+/// Where a new node of `size` wanted at `wanted` actually goes: the nearest spot
+/// (on a [`PLACEMENT_STEP`] grid around `wanted`) that keeps clear of the nodes at
+/// `rects`.
 pub(in crate::editor) fn place_new_node(
-    nodes: &[NodeWidget],
-    config: &NodeConfig,
+    rects: &[egui::Rect],
+    size: egui::Vec2,
     wanted: egui::Pos2,
 ) -> egui::Pos2 {
-    let obstacles: Vec<_> = nodes.iter().map(NodeWidget::rect).collect();
-    free_pos(wanted, config.size(), &obstacles, PLACEMENT_STEP)
+    free_pos(wanted, size, rects, PLACEMENT_STEP)
 }
 
 /// Grid offsets on the square ring at Chebyshev distance `ring` from the center.

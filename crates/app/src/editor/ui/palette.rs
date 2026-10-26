@@ -41,7 +41,7 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
                             .color(super::PANEL_BG)
                             .strong(),
                     )
-                    .fill(node_color(kind))
+                    .fill(node_color(kind.spec()))
                     .stroke(egui::Stroke::new(1.0, super::PANEL_BG))
                     .sense(egui::Sense::click_and_drag()),
                 );

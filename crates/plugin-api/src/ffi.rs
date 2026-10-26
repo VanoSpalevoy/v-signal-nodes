@@ -31,11 +31,12 @@
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
+use std::sync::Arc;
 
 use crate::{
     NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, ParamKind, ParamSpec, ParamValue,
-    Plugin, PluginError, ProcessIo, RawBuffer, Registrar, SignalEnvironment, SignalType,
-    SocketDirection, TextKey, Translation, slice_from_raw,
+    Plugin, PluginError, ProcessIo, RawBuffer, Registrar, Rgb, SignalRate, SocketDirection,
+    TextKey, Translation, slice_from_raw,
 };
 
 /// Name of the exported [`VersionFn`].
@@ -109,10 +110,10 @@ impl FfiStr {
 pub struct FfiSocket {
     /// Label (English).
     pub name: FfiStr,
-    /// [`SignalType`] code.
-    pub signal_type: u8,
-    /// [`SignalEnvironment`] code.
-    pub signal_environment: u8,
+    /// [`SignalRate`] code.
+    pub rate: u8,
+    /// Number of channels (checked by the host's spec validation).
+    pub channels: u16,
 }
 
 /// A parameter of a [`FfiNodeSpec`]. Which fields matter depends on `kind`:
@@ -168,6 +169,10 @@ pub struct FfiNodeSpec {
     pub name: FfiStr,
     /// [`NodeKind`] code.
     pub kind: u8,
+    /// Non-zero if `color` is set.
+    pub has_color: u8,
+    /// The node's own color as `0xRRGGBB`.
+    pub color: u32,
     /// Input sockets, in order.
     pub inputs: FfiSlice<FfiSocket>,
     /// Output sockets, in order.
@@ -185,6 +190,8 @@ pub struct FfiPlugin {
     pub ctx: *mut c_void,
     /// The plugin's name.
     pub name: unsafe extern "C" fn(ctx: *const c_void) -> FfiStr,
+    /// The plugin's version.
+    pub version: unsafe extern "C" fn(ctx: *const c_void) -> FfiStr,
     /// Number of node types.
     pub node_count: unsafe extern "C" fn(ctx: *const c_void) -> usize,
     /// Spec of node type `index` (`< node_count`).
@@ -329,40 +336,31 @@ fn node_kind_from(code: u8) -> Result<NodeKind, PluginError> {
     })
 }
 
-fn signal_type_code(signal_type: SignalType) -> u8 {
-    match signal_type {
-        SignalType::Analog => 0,
-        SignalType::Digital => 1,
-        SignalType::DiscreteTime => 2,
-        SignalType::Quantized => 3,
+fn rate_code(rate: SignalRate) -> u8 {
+    match rate {
+        SignalRate::Audio => 0,
+        SignalRate::Control => 1,
     }
 }
 
-fn signal_type_from(code: u8) -> Result<SignalType, PluginError> {
+fn rate_from(code: u8) -> Result<SignalRate, PluginError> {
     Ok(match code {
-        0 => SignalType::Analog,
-        1 => SignalType::Digital,
-        2 => SignalType::DiscreteTime,
-        3 => SignalType::Quantized,
-        _ => return Err(bad_code("signal type", code)),
+        0 => SignalRate::Audio,
+        1 => SignalRate::Control,
+        _ => return Err(bad_code("signal rate", code)),
     })
 }
 
-fn environment_code(environment: SignalEnvironment) -> u8 {
-    match environment {
-        SignalEnvironment::Electrical => 0,
-        SignalEnvironment::Optical => 1,
-        SignalEnvironment::Acoustic => 2,
+fn color_code(color: Option<Rgb>) -> (u8, u32) {
+    match color {
+        Some(Rgb { r, g, b }) => (1, u32::from_be_bytes([0, r, g, b])),
+        None => (0, 0),
     }
 }
 
-fn environment_from(code: u8) -> Result<SignalEnvironment, PluginError> {
-    Ok(match code {
-        0 => SignalEnvironment::Electrical,
-        1 => SignalEnvironment::Optical,
-        2 => SignalEnvironment::Acoustic,
-        _ => return Err(bad_code("signal environment", code)),
-    })
+fn color_from(has_color: u8, color: u32) -> Option<Rgb> {
+    let [_, r, g, b] = color.to_be_bytes();
+    (has_color != 0).then_some(Rgb { r, g, b })
 }
 
 const PARAM_NUMBER: u8 = 0;
@@ -421,24 +419,21 @@ fn bad_code(what: &str, code: u8) -> PluginError {
 pub unsafe fn read_spec(spec: &FfiNodeSpec) -> Result<NodeSpec, PluginError> {
     // SAFETY: forwarded to the caller (covers the whole function).
     unsafe {
-        let sockets = |list: FfiSlice<FfiSocket>,
-                       direction|
-         -> Result<Vec<NodeSocket>, PluginError> {
-            list.as_slice()
-                .iter()
-                .map(|socket| {
-                    let name = socket.name.read()?;
-                    let signal_type = signal_type_from(socket.signal_type)?;
-                    let environment = environment_from(socket.signal_environment)?;
-                    Ok(match direction {
-                        SocketDirection::Input => NodeSocket::input(name, signal_type, environment),
-                        SocketDirection::Output => {
-                            NodeSocket::output(name, signal_type, environment)
-                        }
+        let sockets =
+            |list: FfiSlice<FfiSocket>, direction| -> Result<Vec<NodeSocket>, PluginError> {
+                list.as_slice()
+                    .iter()
+                    .map(|socket| {
+                        let name = socket.name.read()?;
+                        let rate = rate_from(socket.rate)?;
+                        let socket_of = match direction {
+                            SocketDirection::Input => NodeSocket::input,
+                            SocketDirection::Output => NodeSocket::output,
+                        };
+                        Ok(socket_of(name, rate).with_channels(socket.channels))
                     })
-                })
-                .collect()
-        };
+                    .collect()
+            };
         let params = spec
             .params
             .as_slice()
@@ -488,6 +483,7 @@ pub unsafe fn read_spec(spec: &FfiNodeSpec) -> Result<NodeSpec, PluginError> {
             type_id: spec.type_id.read()?,
             name: spec.name.read()?,
             kind: node_kind_from(spec.kind)?,
+            color: color_from(spec.has_color, spec.color),
             inputs: sockets(spec.inputs, SocketDirection::Input)?,
             outputs: sockets(spec.outputs, SocketDirection::Output)?,
             params,
@@ -508,6 +504,7 @@ pub fn export<P: Plugin + 'static>(make: impl FnOnce() -> P) -> FfiPlugin {
         plugin.register(&mut collector);
         let exported = ExportedPlugin {
             name: plugin.name().to_owned(),
+            version: plugin.version().to_owned(),
             nodes: collector.0.into_iter().map(ExportedNode::new).collect(),
         };
         Box::into_raw(Box::new(exported)).cast::<c_void>()
@@ -516,6 +513,7 @@ pub fn export<P: Plugin + 'static>(make: impl FnOnce() -> P) -> FfiPlugin {
     FfiPlugin {
         ctx,
         name: plugin_name,
+        version: plugin_version,
         node_count: plugin_node_count,
         node_spec: plugin_node_spec,
         create_processor: plugin_create_processor,
@@ -534,6 +532,7 @@ impl Registrar for Collector {
 /// Plugin state behind [`FfiPlugin::ctx`].
 struct ExportedPlugin {
     name: String,
+    version: String,
     nodes: Vec<ExportedNode>,
 }
 
@@ -541,9 +540,11 @@ struct ExportedPlugin {
 ///
 /// The `Ffi*` vectors point into `spec`'s strings and into each other. That is
 /// fine because none of them is modified after construction, so their heap
-/// buffers never move (moving the struct only moves the vector headers).
+/// buffers never move (moving the struct only moves the vector headers). The
+/// spec is shared with the node type's processors, which build their
+/// [`ProcessIo`] from it.
 struct ExportedNode {
-    spec: NodeSpec,
+    spec: Arc<NodeSpec>,
     inputs: Vec<FfiSocket>,
     outputs: Vec<FfiSocket>,
     /// Option labels per parameter (empty for non-choice parameters).
@@ -555,14 +556,14 @@ struct ExportedNode {
 
 impl ExportedNode {
     fn new(provider: Box<dyn NodeProvider>) -> Self {
-        let spec = provider.spec();
+        let spec = Arc::new(provider.spec());
         let sockets = |sockets: &[NodeSocket]| -> Vec<FfiSocket> {
             sockets
                 .iter()
                 .map(|socket| FfiSocket {
                     name: FfiStr::of(&socket.name),
-                    signal_type: signal_type_code(socket.signal_type),
-                    signal_environment: environment_code(socket.signal_environment),
+                    rate: rate_code(socket.rate),
+                    channels: socket.channels,
                 })
                 .collect()
         };
@@ -621,10 +622,13 @@ impl ExportedNode {
     }
 
     fn ffi_spec(&self) -> FfiNodeSpec {
+        let (has_color, color) = color_code(self.spec.color);
         FfiNodeSpec {
             type_id: FfiStr::of(&self.spec.type_id),
             name: FfiStr::of(&self.spec.name),
             kind: node_kind_code(self.spec.kind),
+            has_color,
+            color,
             inputs: FfiSlice::new(&self.inputs),
             outputs: FfiSlice::new(&self.outputs),
             params: FfiSlice::new(&self.params),
@@ -646,6 +650,11 @@ unsafe extern "C" fn plugin_name(ctx: *const c_void) -> FfiStr {
     FfiStr::of(unsafe { &plugin(ctx).name })
 }
 
+unsafe extern "C" fn plugin_version(ctx: *const c_void) -> FfiStr {
+    // SAFETY: as in `plugin_name`.
+    FfiStr::of(unsafe { &plugin(ctx).version })
+}
+
 unsafe extern "C" fn plugin_node_count(ctx: *const c_void) -> usize {
     // SAFETY: as in `plugin_name`.
     unsafe { plugin(ctx).nodes.len() }
@@ -662,6 +671,7 @@ unsafe extern "C" fn plugin_create_processor(ctx: *const c_void, index: usize) -
         let node = unsafe { &plugin(ctx).nodes[index] };
         ExportedProcessor {
             processor: node.provider.create_processor(),
+            spec: Arc::clone(&node.spec),
             params: Vec::with_capacity(node.spec.params.len()),
             error: String::new(),
         }
@@ -688,6 +698,8 @@ unsafe extern "C" fn plugin_drop(ctx: *mut c_void) {
 /// Processor state behind [`FfiProcessor::ctx`].
 struct ExportedProcessor {
     processor: Box<dyn NodeProcessor>,
+    /// The node type's spec, for the [`ProcessIo`] of each call.
+    spec: Arc<NodeSpec>,
     /// Parameter values of the current `process` call, converted from
     /// [`FfiParamValue`]s; sized for the spec's parameters up front, so `process`
     /// doesn't allocate.
@@ -754,6 +766,7 @@ unsafe extern "C" fn processor_process(ctx: *mut c_void, args: FfiProcessArgs) -
         let mut io = unsafe {
             ProcessIo::from_raw(
                 args.frames,
+                &state.spec,
                 &state.params,
                 args.inputs.as_slice(),
                 args.outputs.as_slice(),

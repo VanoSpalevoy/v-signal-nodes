@@ -3,33 +3,30 @@
 //! The file format itself lives in [`crate::document`]; this module only maps the
 //! editor's state onto it and checks every graph rule when a document is opened.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use eframe::egui;
-use v_signal_nodes_core::AppError;
+use v_signal_nodes_core::{AppError, Graph, InputRef, OutputRef};
 
-use super::{
-    MAX_NODE_COUNT, NodeWidget, RouteCache, SocketRef, VSignalNodesApp, free_ids, reaches, ui,
-};
+use super::{MAX_NODE_COUNT, RouteCache, VSignalNodesApp, ui};
 use crate::document::{DocConnection, DocNode, Document};
 
 impl VSignalNodesApp {
     /// The graph as a [`Document`] for saving: nodes in paint order with their
     /// type, position and parameters, every connection, and the plugins used.
+    /// Node IDs are the node numbers (slot indices) shown on the canvas.
     #[allow(dead_code, reason = "no Save command in the UI yet")]
     pub(crate) fn to_document(&self) -> Document {
         let used_plugins = self
-            .nodes
-            .iter()
-            .filter_map(|node| self.plugins.plugin_of(&node.kind().spec().type_id))
-            .map(str::to_owned)
+            .nodes()
+            .filter_map(|node| self.plugins.plugin_of(node.node.type_id()))
+            .map(|plugin| plugin.name.clone())
             .collect();
         let nodes = self
-            .nodes
-            .iter()
+            .nodes()
             .map(|node| DocNode {
-                id: node.id,
-                type_id: node.kind().spec().type_id.clone(),
+                id: node.id.index(),
+                type_id: node.node.type_id().to_owned(),
                 pos: [node.pos.x, node.pos.y],
                 params: node
                     .param_values()
@@ -38,12 +35,12 @@ impl VSignalNodesApp {
             })
             .collect();
         let connections = self
-            .connections
-            .iter()
-            .map(|(to, from)| DocConnection {
-                from_node: from.node_id,
+            .graph
+            .connections()
+            .map(|(from, to)| DocConnection {
+                from_node: from.node.index(),
                 from_output: from.index,
-                to_node: to.node_id,
+                to_node: to.node.index(),
                 to_input: to.index,
             })
             .collect();
@@ -53,12 +50,16 @@ impl VSignalNodesApp {
     /// Replaces the graph with `document`'s, all or nothing: on error the editor
     /// is left unchanged.
     ///
-    /// Fails if a used plugin isn't loaded, a node has an unknown type, a repeated
-    /// or out-of-range ID ([`MAX_NODE_COUNT`]), an unknown parameter or a value its
-    /// spec doesn't accept, or a connection refers to a missing node or socket,
-    /// feeds an input twice or closes a cycle. Parameters left out keep their
-    /// defaults. A node too close to an earlier one (a hand-edited file) is moved
-    /// to the nearest free spot, as when added.
+    /// Fails if a used plugin isn't loaded, there are more than
+    /// [`MAX_NODE_COUNT`] nodes, a node has an unknown type, a repeated ID, an
+    /// unknown parameter or a value its spec doesn't accept, or a connection
+    /// refers to a missing node or socket, feeds an input twice or closes a cycle
+    /// (`core::Graph::connect`). Parameters left out keep their defaults. A node
+    /// too close to an earlier one (a hand-edited file) is moved to the nearest
+    /// free spot, as when added.
+    ///
+    /// Nodes get new ids in the order of their document IDs, so documents with
+    /// IDs `0..n` (as saved) keep their node numbers; gaps are closed.
     ///
     /// Clears the transient state: selection, drag, warnings and routes.
     #[allow(dead_code, reason = "no Open command in the UI yet")]
@@ -66,7 +67,7 @@ impl VSignalNodesApp {
         let missing: Vec<_> = document
             .used_plugins
             .iter()
-            .filter(|name| !self.plugins.plugins().contains(name))
+            .filter(|name| self.plugins.plugin(name).is_none())
             .map(String::as_str)
             .collect();
         if !missing.is_empty() {
@@ -76,56 +77,77 @@ impl VSignalNodesApp {
             )));
         }
 
-        let mut nodes: Vec<NodeWidget> = Vec::with_capacity(document.nodes.len());
+        if document.nodes.len() > MAX_NODE_COUNT {
+            return Err(AppError::InvalidInput(format!(
+                "the document has {} nodes, more than {MAX_NODE_COUNT}",
+                document.nodes.len()
+            )));
+        }
+        let mut by_doc_id = BTreeMap::new();
         for doc_node in &document.nodes {
-            let id = doc_node.id;
-            if id >= MAX_NODE_COUNT || nodes.iter().any(|node| node.id == id) {
+            if by_doc_id.insert(doc_node.id, doc_node).is_some() {
                 return Err(AppError::InvalidInput(format!(
-                    "node ID {id} is out of range or repeated"
+                    "node ID {} is repeated",
+                    doc_node.id
                 )));
             }
+        }
+        let mut graph = Graph::new();
+        let mut ids = HashMap::new();
+        for (&doc_id, doc_node) in &by_doc_id {
             let kind = self.kind_of(&doc_node.type_id).ok_or_else(|| {
-                AppError::InvalidInput(format!("node {id} has unknown type '{}'", doc_node.type_id))
+                AppError::InvalidInput(format!(
+                    "node {doc_id} has unknown type '{}'",
+                    doc_node.type_id
+                ))
             })?;
             let params = doc_node
                 .params
                 .iter()
                 .map(|(param_id, &value)| (param_id.as_str(), value));
-            let config = self.build_config(kind, id, params)?;
+            ids.insert(doc_id, graph.add(self.build_node(&kind, params)?));
+        }
+
+        // Paint order is the document order; each node keeps clear of the earlier ones.
+        let mut positions = HashMap::new();
+        let mut z_order = Vec::with_capacity(document.nodes.len());
+        let mut rects = Vec::with_capacity(document.nodes.len());
+        for doc_node in &document.nodes {
+            let id = ids[&doc_node.id];
+            let size = ui::node_size(graph.node(id).expect("just added").spec());
             let [x, y] = doc_node.pos;
-            let pos = ui::place_new_node(&nodes, &config, egui::pos2(x, y));
-            nodes.push(NodeWidget::new(id, config, pos));
+            let pos = ui::place_new_node(&rects, size, egui::pos2(x, y));
+            rects.push(egui::Rect::from_min_size(pos, size));
+            positions.insert(id, pos);
+            z_order.push(id);
         }
 
-        let mut connections = HashMap::new();
         for connection in &document.connections {
-            let from = SocketRef::output(connection.from_node, connection.from_output);
-            let to = SocketRef::input(connection.to_node, connection.to_input);
-            let exists = |socket: SocketRef| {
-                nodes
-                    .iter()
-                    .any(|node| node.id == socket.node_id && node.has_socket(socket))
+            let node = |doc_id: usize| {
+                ids.get(&doc_id).copied().ok_or_else(|| {
+                    AppError::InvalidInput(format!(
+                        "connection {connection:?} refers to a missing node"
+                    ))
+                })
             };
-            if !exists(from) || !exists(to) {
+            let from = OutputRef::new(node(connection.from_node)?, connection.from_output);
+            let to = InputRef::new(node(connection.to_node)?, connection.to_input);
+            if graph.source(to).is_some() {
                 return Err(AppError::InvalidInput(format!(
-                    "connection {connection:?} refers to a missing socket"
+                    "connection {connection:?} feeds an input twice"
                 )));
             }
-            if connections.contains_key(&to) || reaches(&connections, to.node_id, from.node_id) {
-                return Err(AppError::InvalidInput(format!(
-                    "connection {connection:?} feeds an input twice or closes a cycle"
-                )));
-            }
-            connections.insert(to, from);
+            graph.connect(from, to).map_err(|err| {
+                AppError::InvalidInput(format!("connection {connection:?}: {err}"))
+            })?;
         }
 
-        let used: HashSet<_> = nodes.iter().map(|node| node.id).collect();
-        self.free_node_ids = free_ids(&used);
-        self.nodes = nodes;
-        self.connections = connections;
+        self.graph = graph;
+        self.positions = positions;
+        self.z_order = z_order;
         self.node_limit_reached = false;
         self.pending_source = None;
-        self.connection_refused = false;
+        self.connection_refused = None;
         self.requested_node = None;
         self.drag = None;
         self.routes = RouteCache::default();
@@ -137,30 +159,38 @@ impl VSignalNodesApp {
 mod tests {
     use super::*;
     use crate::editor::tests::assert_apart;
-    use v_signal_nodes_core::ParamValue;
+    use v_signal_nodes_core::{NodeId, ParamValue};
     use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE};
     use v_signal_nodes_plugin_stub::STUB_NODE;
 
-    /// An app with source 0 → gain 1 → mixer 2 (inputs 0 and 1) and a stub node 3.
-    fn sample_graph() -> VSignalNodesApp {
+    /// An app with source 0 → gain 1 → mixer 2 (inputs 0 and 1) and a stub node 3,
+    /// and their ids.
+    fn sample_graph() -> (VSignalNodesApp, Vec<NodeId>) {
         let mut app = VSignalNodesApp::default();
-        for (type_id, x, y) in [
+        let ids: Vec<_> = [
             (SOURCE, 0.0, 0.0),
             (GAIN, 250.0, 0.0),
             (MIXER, 500.0, 0.0),
             (STUB_NODE, 250.0, 300.0),
-        ] {
-            app.add_node_at(app.kind_of(type_id).unwrap(), egui::pos2(x, y));
-        }
-        assert!(app.connect(SocketRef::output(0, 0), SocketRef::input(1, 0)));
-        assert!(app.connect(SocketRef::output(1, 0), SocketRef::input(2, 0)));
-        assert!(app.connect(SocketRef::output(0, 0), SocketRef::input(2, 1)));
-        app
+        ]
+        .into_iter()
+        .map(|(type_id, x, y)| {
+            app.add_node_at(app.kind_of(type_id).unwrap(), egui::pos2(x, y))
+                .unwrap()
+        })
+        .collect();
+        let out = |node: usize| OutputRef::new(ids[node], 0);
+        let input = |node: usize, index| InputRef::new(ids[node], index);
+        assert!(app.connect(out(0), input(1, 0)));
+        assert!(app.connect(out(1), input(2, 0)));
+        assert!(app.connect(out(0), input(2, 1)));
+        (app, ids)
     }
 
-    /// The value of parameter `param_id` of node `node_id`.
-    fn param(app: &VSignalNodesApp, node_id: usize, param_id: &str) -> ParamValue {
-        app.node(node_id)
+    /// The value of parameter `param_id` of the node numbered `index`.
+    fn param(app: &VSignalNodesApp, index: usize, param_id: &str) -> ParamValue {
+        app.nodes()
+            .find(|node| node.id.index() == index)
             .unwrap()
             .param_values()
             .find(|(id, _)| *id == param_id)
@@ -170,8 +200,8 @@ mod tests {
 
     #[test]
     fn document_round_trip() {
-        let mut app = sample_graph();
-        app.raise_node(0);
+        let (mut app, ids) = sample_graph();
+        app.raise_node(ids[0]);
         let document = app.to_document();
 
         assert_eq!(document.used_plugins, ["std", "stub"]);
@@ -180,25 +210,45 @@ mod tests {
         assert_eq!(document.connections.len(), 3);
 
         let mut opened = VSignalNodesApp::default();
-        opened.add_node_at(opened.kind_of(SINK).unwrap(), egui::pos2(900.0, 900.0));
-        opened.select_source(SocketRef::output(0, 0));
+        let sink = opened
+            .add_node_at(opened.kind_of(SINK).unwrap(), egui::pos2(900.0, 900.0))
+            .unwrap();
+        opened.select_source(OutputRef::new(sink, 0));
         opened.open_document(&document).unwrap();
 
         assert_eq!(opened.to_document(), document);
-        assert_eq!(opened.connections, app.connections);
-        assert_eq!(opened.pending_source, None);
-        assert_eq!(opened.free_node_ids.len(), MAX_NODE_COUNT - 4);
-        opened.add_node_at(opened.kind_of(SINK).unwrap(), egui::Pos2::ZERO);
         assert_eq!(
-            opened.nodes.last().unwrap().id,
-            4,
-            "IDs continue after the loaded ones"
+            opened.graph.connections().collect::<Vec<_>>(),
+            app.graph.connections().collect::<Vec<_>>()
         );
+        assert_eq!(opened.pending_source, None);
+        assert_eq!(opened.graph.len(), 4);
+        let added = opened
+            .add_node_at(opened.kind_of(SINK).unwrap(), egui::Pos2::ZERO)
+            .unwrap();
+        assert_eq!(added.index(), 4, "numbers continue after the loaded ones");
+    }
+
+    #[test]
+    fn gaps_in_document_ids_are_closed() {
+        let mut document = sample_graph().0.to_document();
+        for node in &mut document.nodes {
+            node.id *= 10;
+        }
+        for connection in &mut document.connections {
+            connection.from_node *= 10;
+            connection.to_node *= 10;
+        }
+        let mut opened = VSignalNodesApp::default();
+
+        opened.open_document(&document).unwrap();
+
+        assert_eq!(opened.to_document(), sample_graph().0.to_document());
     }
 
     #[test]
     fn document_params_are_saved_and_checked() {
-        let mut document = sample_graph().to_document();
+        let mut document = sample_graph().0.to_document();
         let gain = document.nodes.iter_mut().find(|node| node.id == 1).unwrap();
         assert_eq!(gain.params["gain"], ParamValue::Number(1.0));
         gain.params.insert("gain".into(), ParamValue::Number(0.25));
@@ -217,7 +267,7 @@ mod tests {
 
     #[test]
     fn open_document_refuses_broken_graphs_and_changes_nothing() {
-        let good = sample_graph().to_document();
+        let good = sample_graph().0.to_document();
         let connection = |from_node, from_output, to_node, to_input| DocConnection {
             from_node,
             from_output,
@@ -245,8 +295,14 @@ mod tests {
                 Box::new(|doc| doc.nodes[1].id = doc.nodes[0].id),
             ),
             (
-                "id out of range",
-                Box::new(|doc| doc.nodes[0].id = MAX_NODE_COUNT),
+                "too many nodes",
+                Box::new(|doc| {
+                    let extra = doc.nodes[0].clone();
+                    doc.nodes.extend((0..MAX_NODE_COUNT).map(|i| DocNode {
+                        id: 100 + i,
+                        ..extra.clone()
+                    }));
+                }),
             ),
             (
                 "unknown param",
@@ -289,25 +345,22 @@ mod tests {
         for (case, break_it) in broken {
             let mut document = good.clone();
             break_it(&mut document);
-            let mut opened = sample_graph();
-            opened.select_source(SocketRef::output(3, 0));
+            let (mut opened, ids) = sample_graph();
+            let source = OutputRef::new(ids[3], 0);
+            opened.select_source(source);
 
             assert!(
                 opened.open_document(&document).is_err(),
                 "{case} was accepted"
             );
             assert_eq!(opened.to_document(), good, "{case} changed the graph");
-            assert_eq!(
-                opened.pending_source,
-                Some(SocketRef::output(3, 0)),
-                "{case}"
-            );
+            assert_eq!(opened.pending_source, Some(source), "{case}");
         }
     }
 
     #[test]
     fn open_document_separates_overlapping_nodes() {
-        let mut document = sample_graph().to_document();
+        let mut document = sample_graph().0.to_document();
         for node in &mut document.nodes {
             node.pos = [-50.0, 20.0];
         }
@@ -318,8 +371,7 @@ mod tests {
         assert_apart(&opened);
         assert!(
             opened
-                .nodes
-                .iter()
+                .nodes()
                 .all(|node| node.pos.x >= 0.0 && node.pos.y >= 0.0)
         );
     }

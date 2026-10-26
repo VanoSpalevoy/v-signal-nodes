@@ -1,10 +1,10 @@
 //! Top toolbar.
 //!
-//! - **Snap to grid** — snaps every node's top-left corner to a [`GRID_STEP`] grid
-//!   anchored at the canvas origin, moving nodes to the nearest free grid point
-//!   where snapping would make them overlap (`VSignalNodesApp::snap_to_grid`).
+//! - **Snap to grid** — [`Command::SnapToGrid`]: snaps every node's top-left corner
+//!   to a grid anchored at the canvas origin, moving nodes to the nearest free grid
+//!   point where snapping would make them overlap (`VSignalNodesApp::snap_to_grid`).
 //! - **Scale** — canvas zoom ([`SCALE_RANGE`], in [`SCALE_STEP`] steps) stored in
-//!   `app.scale` and applied by the canvas.
+//!   `app.scale` and applied by the canvas; the View menu zooms in the same steps.
 //! - **Language** — switches the UI language; takes effect on the next frame.
 //!
 //! The toolbar wraps onto more lines when the window is narrow, which makes the
@@ -13,15 +13,8 @@
 use eframe::egui;
 
 use super::{caption, panel_frame};
+use crate::editor::commands::{Command, SCALE_RANGE, SCALE_STEP};
 use crate::editor::{Language, Text, VSignalNodesApp};
-
-/// Grid size used by Snap to grid, in canvas units.
-const GRID_STEP: f32 = 50.0;
-/// Allowed canvas zoom.
-const SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
-/// Zoom slider step. Coarse steps keep the number of distinct font sizes (each
-/// one is rasterized into egui's font atlas) small.
-const SCALE_STEP: f64 = 0.1;
 
 /// Shows the toolbar as a top panel and applies its actions to `app`.
 pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
@@ -34,13 +27,19 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
                 ui.add_space(12.0);
                 caption(ui, app.language.text(Text::Tools));
                 ui.add_space(12.0);
-                if ui.button(app.language.text(Text::SnapToGrid)).clicked() {
-                    app.snap_to_grid(GRID_STEP);
+                if ui
+                    .add_enabled(
+                        app.can_execute(Command::SnapToGrid),
+                        egui::Button::new(app.language.text(Text::SnapToGrid)),
+                    )
+                    .clicked()
+                {
+                    app.execute(Command::SnapToGrid);
                 }
                 ui.separator();
                 ui.add(
                     egui::Slider::new(&mut app.scale, SCALE_RANGE)
-                        .step_by(SCALE_STEP)
+                        .step_by(f64::from(SCALE_STEP))
                         .text(app.language.text(Text::Scale))
                         .show_value(true),
                 );

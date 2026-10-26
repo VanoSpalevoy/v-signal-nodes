@@ -7,7 +7,8 @@
 use eframe::egui;
 
 use super::{Hovered, View, centered_on, delete_button_rect, socket_rect};
-use crate::editor::{NodeKind, SocketKind, SocketRef, Text, VSignalNodesApp};
+use crate::editor::{NodeKind, SocketRef, Text, VSignalNodesApp};
+use v_signal_nodes_core::NodeId;
 
 /// Distance from the viewport edge at which dragging a node starts scrolling (screen points).
 const EDGE_SCROLL_ZONE: f32 = 32.0;
@@ -87,7 +88,7 @@ fn edge_scroll(ui: &egui::Ui, viewport: egui::Rect, pointer: egui::Pos2) {
 fn drag_node(
     app: &mut VSignalNodesApp,
     ui: &egui::Ui,
-    node_id: usize,
+    node_id: NodeId,
     response: &egui::Response,
     view: View,
     viewport: egui::Rect,
@@ -134,9 +135,10 @@ pub(super) fn handle_node_interactions(
     let mut deleted_node_id = None;
     let mut raised_node_id = None;
 
-    for node_index in 0..app.nodes.len() {
-        let node = &app.nodes[node_index];
-        let node_id = node.id;
+    for node_id in app.z_order.clone() {
+        let Some(node) = app.node(node_id) else {
+            continue;
+        };
         // Ids are derived from the node ID, not from creation order, so they stay
         // stable when nodes are added, deleted or reordered.
         let body = ui.interact(
@@ -149,9 +151,8 @@ pub(super) fn handle_node_interactions(
             .map(|socket| {
                 let response = ui
                     .interact(
-                        socket_rect(node, socket.side, socket.index, view),
-                        ui.scope_id()
-                            .with(("canvas_socket", node_id, socket.side, socket.index)),
+                        socket_rect(&node, socket, view),
+                        ui.scope_id().with(("canvas_socket", socket)),
                         egui::Sense::click(),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -160,7 +161,7 @@ pub(super) fn handle_node_interactions(
             .collect();
         let delete = ui
             .interact(
-                view.rect(delete_button_rect(node)),
+                view.rect(delete_button_rect(&node)),
                 ui.scope_id().with(("canvas_node_delete", node_id)),
                 egui::Sense::click(),
             )
@@ -185,11 +186,11 @@ pub(super) fn handle_node_interactions(
             }
             let primary = response.clicked_by(egui::PointerButton::Primary);
             let secondary = response.clicked_by(egui::PointerButton::Secondary);
-            match socket.side {
-                SocketKind::Output if primary => app.select_source(socket),
-                SocketKind::Input if primary => app.connect_pending(socket),
-                SocketKind::Output if secondary => app.disconnect_output(socket),
-                SocketKind::Input if secondary => app.disconnect_input(socket),
+            match socket {
+                SocketRef::Output(output) if primary => app.select_source(output),
+                SocketRef::Input(input) if primary => app.connect_pending(input),
+                SocketRef::Output(output) if secondary => app.disconnect_output(output),
+                SocketRef::Input(input) if secondary => app.disconnect_input(input),
                 _ => {}
             }
         }

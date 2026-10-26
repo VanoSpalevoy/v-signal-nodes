@@ -5,11 +5,15 @@
 //! [`PluginHost::build_node`] then returns the [`Node`] together with its
 //! [`NodeProcessor`].
 //!
+//! [`PluginHost::plugins`] lists the loaded plugins with their versions
+//! ([`LoadedPlugin`]).
+//!
 //! Plugins built as a `cdylib` with `export_plugin!` are loaded with
 //! [`PluginHost::load_library`] (see [`DynamicPlugin`]).
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::sync::Arc;
 
 use v_signal_nodes_core::{AppError, Node, NodeFactory, NodeSpec};
 use v_signal_nodes_plugin_api::{NodeProcessor, NodeProvider, Plugin, Registrar};
@@ -28,12 +32,25 @@ pub struct PluginNode {
 #[derive(Default)]
 pub struct PluginHost {
     factory: NodeFactory,
-    /// Providers by node type id.
-    providers: HashMap<String, Box<dyn NodeProvider>>,
-    /// Names of loaded plugins, in load order.
-    plugins: Vec<String>,
-    /// Index into `plugins` of the plugin that registered each node type id.
-    owners: HashMap<String, usize>,
+    /// Node types by type id.
+    providers: HashMap<String, Provided>,
+    /// Loaded plugins, in load order.
+    plugins: Vec<LoadedPlugin>,
+}
+
+/// A loaded plugin's name and version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedPlugin {
+    pub name: String,
+    /// The plugin's own version (`Plugin::version`).
+    pub version: String,
+}
+
+/// A registered node type: its provider and who registered it.
+struct Provided {
+    provider: Box<dyn NodeProvider>,
+    /// Index into [`PluginHost::plugins`] of the plugin that registered it.
+    plugin: usize,
 }
 
 /// [`Registrar`] that only collects providers, so a plugin is registered all or
@@ -61,7 +78,7 @@ impl PluginHost {
     /// opened ([`DynamicPlugin::open`]).
     pub fn load(&mut self, plugin: &dyn Plugin) -> Result<(), AppError> {
         let name = plugin.name();
-        if self.plugins.iter().any(|loaded| loaded == name) {
+        if self.plugin(name).is_some() {
             return Err(AppError::InvalidInput(format!(
                 "plugin '{name}' is already loaded"
             )));
@@ -70,28 +87,31 @@ impl PluginHost {
         let mut collector = Collector::default();
         plugin.register(&mut collector);
 
-        // Validate everything on a scratch factory first, so a bad plugin leaves
-        // no partial registration behind.
+        // Register on a scratch factory first, so a bad plugin leaves no partial
+        // registration behind; `append` then moves the validated specs over.
         let mut staged = NodeFactory::new();
         let mut entries = Vec::with_capacity(collector.0.len());
         for provider in collector.0 {
             let spec = provider.spec();
-            if self.factory.spec(&spec.type_id).is_some() {
-                return Err(AppError::InvalidInput(format!(
-                    "plugin '{name}': node type '{}' is already registered",
-                    spec.type_id
-                )));
-            }
-            staged.register(spec.clone())?;
-            entries.push((spec, provider));
+            let type_id = spec.type_id.clone();
+            staged.register(spec)?;
+            entries.push((type_id, provider));
         }
+        self.factory.append(staged)?;
 
-        for (spec, provider) in entries {
-            self.owners.insert(spec.type_id.clone(), self.plugins.len());
-            self.providers.insert(spec.type_id.clone(), provider);
-            self.factory.register(spec)?;
-        }
-        self.plugins.push(name.to_owned());
+        let index = self.plugins.len();
+        self.providers
+            .extend(entries.into_iter().map(|(type_id, provider)| {
+                let provided = Provided {
+                    provider,
+                    plugin: index,
+                };
+                (type_id, provided)
+            }));
+        self.plugins.push(LoadedPlugin {
+            name: name.to_owned(),
+            version: plugin.version().to_owned(),
+        });
         Ok(())
     }
 
@@ -108,27 +128,38 @@ impl PluginHost {
         self.load(&plugin)
     }
 
-    /// Names of the loaded plugins, in load order.
-    pub fn plugins(&self) -> &[String] {
+    /// The loaded plugins, in load order.
+    pub fn plugins(&self) -> &[LoadedPlugin] {
         &self.plugins
     }
 
-    /// Name of the plugin that registered node type `type_id`, if it is loaded.
-    pub fn plugin_of(&self, type_id: &str) -> Option<&str> {
-        self.owners
-            .get(type_id)
-            .map(|&index| self.plugins[index].as_str())
+    /// The loaded plugin named `name`.
+    pub fn plugin(&self, name: &str) -> Option<&LoadedPlugin> {
+        self.plugins.iter().find(|plugin| plugin.name == name)
     }
 
-    /// All available node types, sorted by type id.
-    pub fn specs(&self) -> impl Iterator<Item = &NodeSpec> {
+    /// The plugin that registered node type `type_id`, if it is loaded.
+    pub fn plugin_of(&self, type_id: &str) -> Option<&LoadedPlugin> {
+        self.providers
+            .get(type_id)
+            .map(|provided| &self.plugins[provided.plugin])
+    }
+
+    /// All available node types, sorted by type id. The specs are shared with
+    /// the nodes built from them; clone the [`Arc`] to keep one.
+    pub fn specs(&self) -> impl Iterator<Item = &Arc<NodeSpec>> {
         self.factory.specs()
     }
 
-    /// Builds node `id` of type `type_id` with a fresh processor.
-    pub fn build_node(&self, type_id: &str, id: usize) -> Result<PluginNode, AppError> {
-        let node = self.factory.build_node(type_id, id)?;
-        let processor = self.providers[type_id].create_processor();
+    /// The spec of node type `type_id`, if a loaded plugin has it.
+    pub fn spec(&self, type_id: &str) -> Option<&Arc<NodeSpec>> {
+        self.factory.spec(type_id)
+    }
+
+    /// Builds a node of type `type_id` with a fresh processor.
+    pub fn build_node(&self, type_id: &str) -> Result<PluginNode, AppError> {
+        let node = self.factory.build_node(type_id)?;
+        let processor = self.providers[type_id].provider.create_processor();
         Ok(PluginNode { node, processor })
     }
 }
@@ -136,9 +167,10 @@ impl PluginHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use v_signal_nodes_core::{NodeKind, NodeSocket};
-    use v_signal_nodes_core::{ParamSpec, ParamValue};
+    use v_signal_nodes_core::{NodeKind, NodeSocket, NumberParam, ParamValue};
     use v_signal_nodes_plugin_api::{PluginError, ProcessIo, RawBuffer, ffi};
+
+    const GAIN: NumberParam = NumberParam("gain");
 
     struct Gain;
 
@@ -163,7 +195,7 @@ mod tests {
             if !self.prepared {
                 return Err(PluginError::new("not prepared"));
             }
-            let factor = io.number(0);
+            let factor = io.get(GAIN)?;
             let input = io.input(0);
             for (out, sample) in io.output(0).iter_mut().zip(input) {
                 *out = sample * factor + self.offset;
@@ -177,7 +209,7 @@ mod tests {
             NodeSpec::new("test.gain", "Gain", NodeKind::Processor)
                 .input(NodeSocket::audio_in("in"))
                 .output(NodeSocket::audio_out("out"))
-                .param(ParamSpec::number("gain", "Gain", 0.0, 4.0, 2.0))
+                .param(GAIN.spec("Gain", 0.0, 4.0, 2.0))
         }
 
         fn create_processor(&self) -> Box<dyn NodeProcessor> {
@@ -195,6 +227,10 @@ mod tests {
             "test"
         }
 
+        fn version(&self) -> &str {
+            "1.2.3"
+        }
+
         fn register(&self, registrar: &mut dyn Registrar) {
             registrar.register_node(Box::new(Gain));
         }
@@ -206,12 +242,13 @@ mod tests {
         params: &[ParamValue],
         input: &[f32],
     ) -> Result<Vec<f32>, PluginError> {
+        let spec = Gain.spec();
         let mut output = vec![0.0; input.len()];
         let inputs = [RawBuffer::input(input)];
         let outputs = [RawBuffer::output(&mut output)];
-        // SAFETY: both buffers are `input.len()` long, live for the call and
-        // don't overlap.
-        let mut io = unsafe { ProcessIo::from_raw(input.len(), params, &inputs, &outputs) };
+        // SAFETY: the spec has one mono audio input and output, both buffers are
+        // `input.len()` long, live for the call and don't overlap.
+        let mut io = unsafe { ProcessIo::from_raw(input.len(), &spec, params, &inputs, &outputs) };
         processor.process(&mut io)?;
         Ok(output)
     }
@@ -229,6 +266,17 @@ mod tests {
         assert_eq!(run(processor, &params, &[1.0, -0.5]).unwrap(), [2.0, -1.0]);
         let half = [ParamValue::Number(0.5)];
         assert_eq!(run(processor, &half, &[1.0]).unwrap(), [0.5]);
+        // A value of the wrong kind is an error, not a silent 0.0.
+        let wrong = [ParamValue::Toggle(true)];
+        assert!(run(processor, &wrong, &[1.0]).is_err());
+    }
+
+    /// `test`, version 1.2.3, as the host lists it.
+    fn test_plugin() -> LoadedPlugin {
+        LoadedPlugin {
+            name: "test".into(),
+            version: "1.2.3".into(),
+        }
     }
 
     #[test]
@@ -236,13 +284,17 @@ mod tests {
         let mut host = PluginHost::new();
         host.load(&TestPlugin).unwrap();
 
-        let mut built = host.build_node("test.gain", 3).unwrap();
+        let mut built = host.build_node("test.gain").unwrap();
 
-        assert_eq!(built.node.id, 3);
-        assert_eq!(built.node.type_id, "test.gain");
+        assert_eq!(built.node.type_id(), "test.gain");
+        assert!(Arc::ptr_eq(
+            built.node.spec(),
+            host.spec("test.gain").unwrap()
+        ));
         check_life_cycle(built.processor.as_mut());
-        assert_eq!(host.plugins(), ["test"]);
-        assert_eq!(host.plugin_of("test.gain"), Some("test"));
+        assert_eq!(host.plugins(), [test_plugin()]);
+        assert_eq!(host.plugin("test"), Some(&test_plugin()));
+        assert_eq!(host.plugin_of("test.gain"), Some(&test_plugin()));
         assert_eq!(host.plugin_of("test.missing"), None);
     }
 
@@ -255,10 +307,10 @@ mod tests {
         host.load(&plugin).unwrap();
         drop(plugin);
 
-        let mut built = host.build_node("test.gain", 0).unwrap();
+        let mut built = host.build_node("test.gain").unwrap();
 
         check_life_cycle(built.processor.as_mut());
-        assert_eq!(host.plugins(), ["test"]);
+        assert_eq!(host.plugins(), [test_plugin()]);
     }
 
     #[test]
@@ -274,6 +326,51 @@ mod tests {
         linked.load(&v_signal_nodes_plugin_std::StdPlugin).unwrap();
 
         assert!(linked.specs().eq(through_ffi.specs()));
+        assert_eq!(linked.plugins(), through_ffi.plugins());
+    }
+
+    #[test]
+    fn colors_and_channels_survive_the_c_abi() {
+        struct Wide;
+
+        impl NodeProvider for Wide {
+            fn spec(&self) -> NodeSpec {
+                NodeSpec::new("test.wide", "Wide", NodeKind::Generator)
+                    .color(v_signal_nodes_core::Rgb::new(1, 2, 3))
+                    .input(NodeSocket::control_in("rate").with_channels(3))
+                    .output(NodeSocket::audio_out("out").with_channels(2))
+            }
+
+            fn create_processor(&self) -> Box<dyn NodeProcessor> {
+                Box::new(GainProcessor {
+                    prepared: false,
+                    offset: 0.0,
+                })
+            }
+        }
+
+        struct WidePlugin;
+
+        impl Plugin for WidePlugin {
+            fn name(&self) -> &str {
+                "wide"
+            }
+
+            fn version(&self) -> &str {
+                "0.1.0"
+            }
+
+            fn register(&self, registrar: &mut dyn Registrar) {
+                registrar.register_node(Box::new(Wide));
+            }
+        }
+
+        // SAFETY: as in `builds_a_working_node_through_the_c_abi`.
+        let plugin = unsafe { DynamicPlugin::from_ffi(ffi::export(|| WidePlugin), None) }.unwrap();
+        let mut host = PluginHost::new();
+        host.load(&plugin).unwrap();
+
+        assert_eq!(**host.spec("test.wide").unwrap(), Wide.spec());
     }
 
     #[test]
@@ -291,6 +388,6 @@ mod tests {
         host.load(&TestPlugin).unwrap();
 
         assert!(host.load(&TestPlugin).is_err());
-        assert!(host.build_node("test.missing", 0).is_err());
+        assert!(host.build_node("test.missing").is_err());
     }
 }

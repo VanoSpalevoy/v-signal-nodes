@@ -21,6 +21,7 @@ use v_signal_nodes_plugin_api::{
 pub struct DynamicPlugin {
     loaded: Arc<Loaded>,
     name: String,
+    version: String,
     specs: Vec<NodeSpec>,
 }
 
@@ -94,16 +95,18 @@ impl DynamicPlugin {
         });
         let plugin = &loaded.plugin;
         // SAFETY: `ctx` is live; returned data is copied before the next call.
-        let (name, specs) = unsafe {
+        let (name, version, specs) = unsafe {
             let name = (plugin.name)(plugin.ctx).read()?;
+            let version = (plugin.version)(plugin.ctx).read()?;
             let specs = (0..(plugin.node_count)(plugin.ctx))
                 .map(|index| ffi::read_spec(&(plugin.node_spec)(plugin.ctx, index)))
                 .collect::<Result<_, _>>()?;
-            (name, specs)
+            (name, version, specs)
         };
         Ok(Self {
             loaded,
             name,
+            version,
             specs,
         })
     }
@@ -112,6 +115,10 @@ impl DynamicPlugin {
 impl Plugin for DynamicPlugin {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn version(&self) -> &str {
+        &self.version
     }
 
     fn register(&self, registrar: &mut dyn Registrar) {

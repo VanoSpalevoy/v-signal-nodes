@@ -483,6 +483,12 @@ impl<'a> Grid<'a> {
         let floor = from.min(to).min(Pos2::ZERO);
         let lo = (from.min(to) - Vec2::splat(SEARCH_MARGIN)).max(floor);
         let hi = from.max(to) + Vec2::splat(SEARCH_MARGIN);
+        // Size check in floats first: for ends very far apart the integer cell
+        // counts below would saturate and overflow.
+        let span = (hi - lo) / cell + Vec2::splat(2.0);
+        if span.x * span.y > MAX_CELLS as f32 {
+            return None;
+        }
         let min = (
             ((lo.x - from.x) / cell.x).floor() as i32,
             ((lo.y - from.y) / cell.y).floor() as i32,
@@ -756,6 +762,18 @@ mod tests {
             &[],
             20.0,
         );
+        assert!(matches!(route, Route::Curve(_)));
+    }
+
+    #[test]
+    fn ends_too_far_apart_to_search_keep_the_curve() {
+        // A node in the way forces a search, but the area is far too big for it
+        // (and its cell counts would overflow `i32`).
+        let (start, end) = (pos2(160.0, 45.0), pos2(1e12, 1e12));
+        let blocker = Rect::from_center_size(start.lerp(end, 0.5), vec2(1e11, 1e11));
+
+        let route = route(start, end, &[blocker], &[], &[], 20.0);
+
         assert!(matches!(route, Route::Curve(_)));
     }
 

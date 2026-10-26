@@ -7,7 +7,8 @@
 //! # Layout
 //!
 //! ```text
-//! ┌──────────────────────── toolbar ─────────────────────────┐
+//! ┌──────────────────────── menu bar ────────────────────────┐
+//! ├──────────────────────── toolbar ─────────────────────────┤
 //! ├─────────┬────────────────────────────────────────────────┤
 //! │ palette │ canvas (scrolls both ways)                    ▐│
 //! │         │                                               ▐│
@@ -19,7 +20,8 @@
 //!
 //! | Module      | Panel           | Role                                               |
 //! |-------------|-----------------|----------------------------------------------------|
-//! | [`toolbar`] | top             | grid snapping, zoom, language                      |
+//! | [`menu`]    | top             | menu bar and keyboard shortcuts (commands)         |
+//! | [`toolbar`] | top, below menu | grid snapping, zoom, language                      |
 //! | [`debug`]   | bottom          | status line and the list of connections            |
 //! | [`palette`] | left            | node kinds to drag onto the canvas                 |
 //! | [`canvas`]  | central         | nodes and connections: drag, connect, delete       |
@@ -42,6 +44,7 @@
 
 mod canvas;
 mod debug;
+mod menu;
 mod node;
 mod palette;
 mod placement;
@@ -49,12 +52,13 @@ mod routing;
 mod toolbar;
 
 use eframe::egui;
+use v_signal_nodes_core::NodeSpec;
 
 use super::VSignalNodesApp;
 pub(super) use canvas::RouteCache;
 #[cfg(test)]
 pub(super) use node::std_kind;
-pub(super) use node::{NodeConfig, NodeKind, NodeWidget, SocketKind, SocketRef};
+pub(super) use node::{NodeKind, NodeWidget, SocketRef, node_size};
 pub(super) use placement::{place_new_node, settle, snap};
 
 /// Darkest background: text edits, slider rails and other "extreme" backgrounds.
@@ -83,8 +87,11 @@ const DANGER: egui::Color32 = egui::Color32::from_rgb(235, 96, 96);
 /// Rounding of buttons and other controls.
 const CONTROL_RADIUS: u8 = 6;
 
-/// Draws the whole editor for one frame: panels in layout order.
+/// Draws the whole editor for one frame: keyboard shortcuts first (before any
+/// widget sees the keys), then the panels in layout order.
 pub(super) fn render(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
+    menu::handle_shortcuts(app, ui.ctx());
+    menu::show(app, ui);
     toolbar::show(app, ui);
     debug::show(app, ui);
     palette::show(app, ui);
@@ -172,11 +179,14 @@ fn visuals() -> egui::Visuals {
 /// Accent color of a node kind: the palette button fill, the node outline, header
 /// tint and socket dots, and the drop preview, so a kind is recognizable everywhere.
 ///
-/// Decided by the node's role (`core::NodeKind` of its spec): generators green,
-/// processors violet, outputs orange.
-fn node_color(kind: &NodeKind) -> egui::Color32 {
+/// The spec's own [`NodeSpec::color`] if it sets one, else decided by the node's
+/// role (`core::NodeKind`): generators green, processors violet, outputs orange.
+fn node_color(spec: &NodeSpec) -> egui::Color32 {
     use v_signal_nodes_core::NodeKind as Role;
-    match kind.spec().kind {
+    if let Some(color) = spec.color {
+        return egui::Color32::from_rgb(color.r, color.g, color.b);
+    }
+    match spec.kind {
         Role::Generator => egui::Color32::from_rgb(82, 196, 126),
         Role::Processor => egui::Color32::from_rgb(152, 124, 250),
         Role::Output => egui::Color32::from_rgb(236, 128, 92),

@@ -2,14 +2,15 @@
 //!
 //! Shows, top to bottom:
 //! - a node-limit warning when the last add failed (see `node_limit_reached`);
-//! - a warning when the last connection was refused as a cycle (`connection_refused`);
+//! - a warning when the last connection was refused, with the reason (a cycle or
+//!   sockets that don't fit, `connection_refused`);
 //! - the selected source socket, or "Ready" when nothing is selected and there
 //!   are no warnings;
 //! - every connection as `from_node Output n -> to_node Input m`, sorted by source
 //!   and scrollable once it exceeds [`CONNECTIONS_MAX_HEIGHT`].
 //!
-//! Node IDs are shown as-is (0-based), socket numbers 1-based. Read-only: the
-//! panel never changes the app state.
+//! Nodes are shown by their number (the `#n` of the node title, 0-based), socket
+//! numbers 1-based. Read-only: the panel never changes the app state.
 
 use eframe::egui;
 
@@ -36,19 +37,16 @@ pub(super) fn show(app: &VSignalNodesApp, ui: &mut egui::Ui) {
                     ),
                 );
             }
-            if app.connection_refused {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    app.language.text(Text::ConnectionCreatesCycle),
-                );
+            if let Some(reason) = app.connection_refused {
+                ui.colored_label(ui.visuals().error_fg_color, app.language.text(reason));
             }
             if let Some(source) = app.pending_source {
                 ui.label(format!(
                     "{} {}",
                     app.language.text(Text::SelectedSourceSocket),
-                    socket_text(source, app.language),
+                    socket_text(SocketRef::Output(source), app.language),
                 ));
-            } else if !app.node_limit_reached && !app.connection_refused {
+            } else if !app.node_limit_reached && app.connection_refused.is_none() {
                 ui.label(app.language.text(Text::Ready));
             }
             egui::ScrollArea::vertical()
@@ -57,8 +55,8 @@ pub(super) fn show(app: &VSignalNodesApp, ui: &mut egui::Ui) {
                     for (from, to) in app.sorted_connections() {
                         let line = format!(
                             "{} -> {}",
-                            socket_text(from, app.language),
-                            socket_text(to, app.language),
+                            socket_text(SocketRef::Output(from), app.language),
+                            socket_text(SocketRef::Input(to), app.language),
                         );
                         ui.label(
                             egui::RichText::new(line)
@@ -71,12 +69,13 @@ pub(super) fn show(app: &VSignalNodesApp, ui: &mut egui::Ui) {
         });
 }
 
-/// `socket` as `node Side n`, e.g. `3 Output 1` (socket number 1-based).
+/// `socket` as `node Side n`, e.g. `3 Output 1` (node number as in the node
+/// title, socket number 1-based).
 fn socket_text(socket: SocketRef, language: Language) -> String {
     format!(
         "{} {} {}",
-        socket.node_id,
-        socket.side.label(language),
-        socket.index + 1
+        socket.node(),
+        language.text(socket.side().into()),
+        socket.index() + 1
     )
 }

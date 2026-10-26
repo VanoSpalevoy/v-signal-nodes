@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use super::{CONNECTION_MIN_HANDLE, HEADER_HEIGHT, Hovered, View, delete_button_rect, drop_rect};
 use crate::editor::ui::routing::{self, Route};
 use crate::editor::ui::{ACCENT, DANGER, NodeKind, PANEL_BG, TEXT, TEXT_DIM, node_color};
-use crate::editor::{Language, NodeWidget, SocketKind, VSignalNodesApp};
+use crate::editor::{Language, NodeWidget, SocketRef, VSignalNodesApp};
+use v_signal_nodes_core::{NodeId, SocketDirection};
 
 /// Corner radius of a node.
 const NODE_ROUNDING: f32 = 8.0;
@@ -42,6 +43,11 @@ const ROUTE_CORNER_SEGMENTS: usize = 6;
 const MITER_LIMIT: f32 = 2.0;
 /// Extra margin around a connection's bounds before it counts as off screen.
 const CULL_PADDING: f32 = 4.0;
+/// Largest distance (screen points) between a connection curve and the polyline
+/// it is drawn as. Always given explicitly: egui's default scales with the
+/// horizontal distance between the ends, which is zero for vertically aligned
+/// sockets (a panic in debug builds, an endless subdivision in release).
+const CURVE_TOLERANCE: f32 = 0.1;
 /// Background grid dots.
 const GRID_DOT: egui::Color32 = egui::Color32::from_rgb(28, 30, 37);
 
@@ -80,12 +86,11 @@ fn paint_connections(
     view: View,
     viewport: egui::Rect,
 ) {
-    let colors: HashMap<usize, egui::Color32> = app
-        .nodes
-        .iter()
-        .map(|node| (node.id, node_color(node.kind())))
+    let colors: HashMap<NodeId, egui::Color32> = app
+        .nodes()
+        .map(|node| (node.id, node_color(node.spec())))
         .collect();
-    let kind_color = |node_id: usize| colors.get(&node_id).copied().unwrap_or(ACCENT);
+    let kind_color = |node_id: NodeId| colors.get(&node_id).copied().unwrap_or(ACCENT);
     let width = view.len(CONNECTION_WIDTH);
     for connection in app.routes.routes() {
         let bounds = connection.bounds.expand(CONNECTION_WIDTH + CULL_PADDING);
@@ -93,13 +98,7 @@ fn paint_connections(
             continue;
         }
         let points = match &connection.route {
-            Route::Curve(points) => egui::epaint::CubicBezierShape::from_points_stroke(
-                points.map(|p| view.pos(p)),
-                false,
-                egui::Color32::TRANSPARENT,
-                egui::Stroke::NONE,
-            )
-            .flatten(None),
+            Route::Curve(points) => flatten_curve(points.map(|p| view.pos(p))),
             Route::Path(points) => {
                 let points: Vec<_> = points.iter().map(|p| view.pos(*p)).collect();
                 rounded_corners(&points, view.len(ROUTE_CORNER_RADIUS))
@@ -109,10 +108,22 @@ fn paint_connections(
             painter,
             &points,
             width,
-            kind_color(connection.from.node_id),
-            kind_color(connection.to.node_id),
+            kind_color(connection.from.node),
+            kind_color(connection.to.node),
         );
     }
+}
+
+/// The cubic Bézier `points` (screen coordinates) as a polyline, within
+/// [`CURVE_TOLERANCE`].
+fn flatten_curve(points: [egui::Pos2; 4]) -> Vec<egui::Pos2> {
+    egui::epaint::CubicBezierShape::from_points_stroke(
+        points,
+        false,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::NONE,
+    )
+    .flatten(Some(CURVE_TOLERANCE))
 }
 
 /// Draws a polyline (screen coordinates) whose color changes from `start` to `end`
@@ -247,10 +258,10 @@ fn paint_pending_connection(
     let (Some(source), Some(pointer)) = (app.pending_source, pointer) else {
         return;
     };
-    let Some(node) = app.node(source.node_id) else {
+    let Some(node) = app.node(source.node) else {
         return;
     };
-    let start = view.pos(node.socket_pos(source.side, source.index));
+    let start = view.pos(node.socket_pos(SocketDirection::Output, source.index));
     let stroke = egui::Stroke::new(view.len(CONNECTION_WIDTH), ACCENT.gamma_multiply(0.5));
     let curve = routing::bezier(start, pointer, view.len(CONNECTION_MIN_HANDLE));
     painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
@@ -271,15 +282,17 @@ fn paint_grid(painter: &egui::Painter, view: View, viewport: egui::Rect) {
     let visible =
         egui::Rect::from_min_max(view.to_canvas(viewport.min), view.to_canvas(viewport.max));
     let radius = view.len(1.0).max(0.8);
-    let first = (visible.min.to_vec2() / GRID_SPACING).floor() * GRID_SPACING;
-    let mut y = first.y;
-    while y <= visible.max.y {
-        let mut x = first.x;
-        while x <= visible.max.x {
+    // Dots are counted by grid index, not by adding the spacing to a float: far
+    // from the origin `x + GRID_SPACING` rounds back to `x` and never ends.
+    let first = (visible.min.to_vec2() / GRID_SPACING).floor();
+    let last = (visible.max.to_vec2() / GRID_SPACING).floor();
+    let count = |axis: f32, last: f32| (last - axis + 1.0).max(0.0) as usize;
+    for row in 0..count(first.y, last.y) {
+        let y = (first.y + row as f32) * GRID_SPACING;
+        for column in 0..count(first.x, last.x) {
+            let x = (first.x + column as f32) * GRID_SPACING;
             painter.circle_filled(view.pos(egui::pos2(x, y)), radius, GRID_DOT);
-            x += GRID_SPACING;
         }
-        y += GRID_SPACING;
     }
 }
 
@@ -290,35 +303,35 @@ fn paint_grid(painter: &egui::Painter, view: View, viewport: egui::Rect) {
 /// the zoom.
 fn paint_nodes(app: &VSignalNodesApp, painter: &egui::Painter, view: View, hovered: &Hovered) {
     let language = app.language;
-    for node in &app.nodes {
+    for node in app.nodes() {
         let rect = view.rect(node.rect());
         let rounding = view.len(NODE_ROUNDING);
         painter.rect_filled(rect, rounding, PANEL_BG);
-        paint_header(painter, view, node, language);
+        paint_header(painter, view, &node, language);
         painter.rect_stroke(
             rect,
             rounding,
-            egui::Stroke::new(view.len(NODE_OUTLINE_WIDTH), node_color(node.kind())),
+            egui::Stroke::new(view.len(NODE_OUTLINE_WIDTH), node_color(node.spec())),
             egui::StrokeKind::Inside,
         );
-        for (index, param) in node.config.params.iter().enumerate() {
+        for index in 0..node.param_count() {
             painter.text(
                 view.pos(node.param_pos(index)),
                 egui::Align2::CENTER_CENTER,
-                node.config.param_label(param, language),
+                node.param_label(index, language),
                 view.font(12.0),
                 TEXT_DIM,
             );
         }
-        paint_sockets(app, node, painter, view, hovered);
-        paint_delete_button(painter, view, node, hovered.delete_button == Some(node.id));
+        paint_sockets(app, &node, painter, view, hovered);
+        paint_delete_button(painter, view, &node, hovered.delete_button == Some(node.id));
     }
 }
 
 /// Draws a node's header: the band tinted with the kind color (rounded at the
 /// top like the node), a faint line under it, and the title (`Kind #id`).
 fn paint_header(painter: &egui::Painter, view: View, node: &NodeWidget, language: Language) {
-    let color = node_color(node.kind());
+    let color = node_color(node.spec());
     let rect = view.rect(node.rect());
     let header =
         egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), view.len(HEADER_HEIGHT)));
@@ -342,7 +355,7 @@ fn paint_header(painter: &egui::Painter, view: View, node: &NodeWidget, language
     let title_rect = painter.text(
         egui::pos2(rect.left() + view.len(TITLE_PADDING), header.center().y),
         egui::Align2::LEFT_CENTER,
-        node.kind().label(language),
+        node.title(language),
         view.font(13.0),
         TEXT,
     );
@@ -396,9 +409,9 @@ fn paint_sockets(
     view: View,
     hovered: &Hovered,
 ) {
-    let color = node_color(node.kind());
+    let color = node_color(node.spec());
     for socket in node.sockets() {
-        let pos = view.pos(node.socket_pos(socket.side, socket.index));
+        let pos = view.pos(node.socket_pos(socket.side(), socket.index()));
         let (radius, fill) = if hovered.socket == Some(socket) {
             (view.len(SOCKET_RADIUS + SOCKET_HOVER_GROW), ACCENT)
         } else {
@@ -410,7 +423,7 @@ fn paint_sockets(
             fill,
             egui::Stroke::new(view.len(2.0), PANEL_BG),
         );
-        if app.pending_source == Some(socket) {
+        if app.pending_source.map(SocketRef::Output) == Some(socket) {
             painter.circle_stroke(
                 pos,
                 radius + view.len(4.0),
@@ -418,15 +431,14 @@ fn paint_sockets(
             );
         }
 
-        let (align, direction) = match socket.side {
-            SocketKind::Input => (egui::Align2::LEFT_CENTER, 1.0),
-            SocketKind::Output => (egui::Align2::RIGHT_CENTER, -1.0),
+        let (align, direction) = match socket {
+            SocketRef::Input(_) => (egui::Align2::LEFT_CENTER, 1.0),
+            SocketRef::Output(_) => (egui::Align2::RIGHT_CENTER, -1.0),
         };
         painter.text(
             pos + egui::vec2(direction * view.len(SOCKET_LABEL_GAP), 0.0),
             align,
-            node.config
-                .socket_label(socket.side, socket.index, app.language),
+            node.socket_label(socket, app.language),
             view.font(11.0),
             TEXT_DIM,
         );
@@ -460,7 +472,7 @@ fn paint_drop_preview(app: &VSignalNodesApp, painter: &egui::Painter, view: View
     for (node_id, pos) in app.drop_moves() {
         if let Some(node) = app.node(node_id) {
             let rect = egui::Rect::from_min_size(pos, node.rect().size());
-            paint_ghost(painter, view, rect, node_color(node.kind()));
+            paint_ghost(painter, view, rect, node_color(node.spec()));
         }
     }
 }
@@ -476,8 +488,8 @@ fn paint_palette_preview(
     let (Some(kind), Some(pos)) = (egui::DragAndDrop::payload::<NodeKind>(ctx), pointer) else {
         return;
     };
-    let rect = drop_rect(&kind, pos, view, &app.nodes);
-    let preview_rect = paint_ghost(painter, view, rect, node_color(&kind));
+    let rect = drop_rect(&kind, pos, view, &app.node_rects());
+    let preview_rect = paint_ghost(painter, view, rect, node_color(kind.spec()));
     painter.text(
         preview_rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -494,6 +506,24 @@ mod tests {
 
     const RED: Color32 = Color32::from_rgb(255, 0, 0);
     const BLUE: Color32 = Color32::from_rgb(0, 0, 255);
+
+    #[test]
+    fn curves_between_vertically_aligned_sockets_flatten() {
+        // Output right above the input: egui's default tolerance would be zero.
+        let start = pos2(100.0, 0.0);
+        let end = pos2(100.0, 200.0);
+        let curve = routing::bezier(start, end, CONNECTION_MIN_HANDLE);
+
+        let points = flatten_curve(curve);
+
+        assert_eq!(points.first(), Some(&start));
+        assert_eq!(points.last(), Some(&end));
+        assert!(
+            points.len() > 2 && points.len() < 1_000,
+            "{} points",
+            points.len()
+        );
+    }
 
     #[test]
     fn gradient_line_runs_from_start_to_end_color() {

@@ -2,7 +2,7 @@
 
 # v-signal-nodes
 
-**A node-based signal and audio graph editor written in Rust**
+**A node-based signal processing editor written in Rust**
 
 [![CI](https://github.com/VanoSpalevoy/v-signal-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/VanoSpalevoy/v-signal-forge/actions/workflows/ci.yml)
 ![Rust 1.99.1](https://img.shields.io/badge/rust-1.99.1-orange?logo=rust)
@@ -17,9 +17,18 @@ Build signal processing out of nodes (generators, processors, outputs) wired
 together on a canvas. Every node type comes from a plugin, so the editor itself
 knows no node types and grows without changes to its code.
 
+The signals can be of any kind, with a lean towards electrical ones:
+
+- **analog**: continuous signals, modeled as finely sampled streams;
+- **sampled**: discrete in time, continuous in value;
+- **digital**: discrete in both time and value, down to bit streams.
+
+Sound is just one kind of sampled signal. For now, the model covers sampled
+real-valued streams; formats for complex (IQ) samples and bits are planned.
+
 > [!NOTE]
 > **Status: early development.** You can build graphs in the editor, but nothing
-> plays yet: there's no processing runtime. You can't edit parameters or save
+> runs yet: the graph runtime isn't connected to the editor. You can't edit parameters or save
 > graphs yet either. The plugin API is still changing, and plugins built for one
 > API version are refused by hosts built for another.
 
@@ -197,8 +206,8 @@ export_plugin!(MyPlugin);
   take modulation inputs), a `Processor` needs inputs and outputs, and an
   `Output` needs an input. The role picks the palette group and the default
   color; `NodeSpec::color` sets a color of its own.
-- **Sockets** carry a rate (`SignalRate::Audio`: a value per sample;
-  `SignalRate::Control`: one value per block) and a channel count
+- **Sockets** carry a rate (`SignalRate::Audio`: a value per sample, for any
+  sampled signal, not only sound; `SignalRate::Control`: one value per block) and a channel count
   (`with_channels`, mono by default). A socket's buffer holds its channels one
   after another; `ProcessIo::input_channels` / `output_channels` split it.
 - **Parameters** are declared as key constants (`NumberParam`, `ChoiceParam`,
@@ -216,7 +225,7 @@ export_plugin!(MyPlugin);
 
 - The host calls `prepare(sample_rate, max_frames)` before the first `process`
   and again when either value changes. That's the place to allocate memory,
-  because `process` runs on the audio thread.
+  because `process` runs on the real-time thread.
 - `process` gets at most `max_frames` frames per call. Outputs start zeroed.
 - `reset` clears the signal history (phase, filter state) when playback jumps.
 - Panics in dynamic-library plugins are caught at the C ABI boundary. This
@@ -236,6 +245,8 @@ already load a dynamic library, but the editor doesn't call it yet.
 - [x] CI on Linux, macOS and Windows
 - [x] Graph in `core` with connection checks and generational node ids
 - [ ] Graph runtime: real-time processing and an offline pass
+- [ ] Sample formats beyond real numbers: complex (IQ) and digital (bits)
+- [ ] Device and file I/O: sound cards, ADCs/DACs, signal files
 - [ ] Editing node parameters
 - [ ] Saving and loading graphs, undo and redo
 - [ ] Selecting and moving several nodes at once

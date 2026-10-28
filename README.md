@@ -83,9 +83,6 @@ on Debian or Ubuntu:
 sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
 ```
 
-The `dev` profile is optimized (`opt-level = 1`, dependencies at 3), because the
-unoptimized editor stutters when it routes connections.
-
 ## Using the editor
 
 | Action                       | How                                                    |

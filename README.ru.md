@@ -83,9 +83,6 @@ cargo build -p v-signal-nodes-app --release   # релизная сборка: t
 sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
 ```
 
-Профиль `dev` собирается с оптимизациями (`opt-level = 1`, зависимости — 3):
-без них прокладка проводов заметно подтормаживает.
-
 ## Работа в редакторе
 
 | Действие                     | Как                                                    |

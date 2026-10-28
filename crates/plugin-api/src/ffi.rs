@@ -338,14 +338,14 @@ fn node_kind_from(code: u8) -> Result<NodeKind, PluginError> {
 
 fn rate_code(rate: SignalRate) -> u8 {
     match rate {
-        SignalRate::Audio => 0,
+        SignalRate::Sample => 0,
         SignalRate::Control => 1,
     }
 }
 
 fn rate_from(code: u8) -> Result<SignalRate, PluginError> {
     Ok(match code {
-        0 => SignalRate::Audio,
+        0 => SignalRate::Sample,
         1 => SignalRate::Control,
         _ => return Err(bad_code("signal rate", code)),
     })

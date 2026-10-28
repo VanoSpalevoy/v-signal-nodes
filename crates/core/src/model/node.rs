@@ -91,8 +91,8 @@ mod tests {
     fn gain() -> Arc<NodeSpec> {
         Arc::new(
             NodeSpec::new("test.gain", "Gain", NodeKind::Processor)
-                .input(NodeSocket::audio_in("in"))
-                .output(NodeSocket::audio_out("out"))
+                .input(NodeSocket::signal_in("in"))
+                .output(NodeSocket::signal_out("out"))
                 .param(ParamSpec::number("gain", "Gain", 0.0, 2.0, 1.0))
                 .param(ParamSpec::toggle("on", "On", true)),
         )

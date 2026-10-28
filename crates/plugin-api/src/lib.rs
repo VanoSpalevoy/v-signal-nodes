@@ -40,8 +40,8 @@
 //! impl NodeProvider for MyGain {
 //!     fn spec(&self) -> NodeSpec {
 //!         NodeSpec::new("my.gain", "Gain", NodeKind::Processor)
-//!             .input(NodeSocket::audio_in("In"))
-//!             .output(NodeSocket::audio_out("Out"))
+//!             .input(NodeSocket::signal_in("In"))
+//!             .output(NodeSocket::signal_out("Out"))
 //!             .param(GAIN.spec("Gain", 0.0, 2.0, 1.0))
 //!     }
 //!     fn create_processor(&self) -> Box<dyn NodeProcessor> { Box::new(MyGainProcessor) }
@@ -379,9 +379,9 @@ mod tests {
     /// A stereo audio input, a 2-channel control input and a stereo output.
     fn spec() -> NodeSpec {
         NodeSpec::new("test.io", "IO", NodeKind::Processor)
-            .input(NodeSocket::audio_in("audio").with_channels(2))
+            .input(NodeSocket::signal_in("audio").with_channels(2))
             .input(NodeSocket::control_in("control").with_channels(2))
-            .output(NodeSocket::audio_out("out").with_channels(2))
+            .output(NodeSocket::signal_out("out").with_channels(2))
             .param(LEVEL.spec("Level", 0.0, 1.0, 0.5))
     }
 

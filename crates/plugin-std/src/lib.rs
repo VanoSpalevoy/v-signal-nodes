@@ -66,7 +66,7 @@ const FREQUENCY: NumberParam = NumberParam("frequency");
 impl NodeProvider for Source {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(SOURCE, "Source", NodeKind::Generator)
-            .output(NodeSocket::audio_out("Audio"))
+            .output(NodeSocket::signal_out("Audio"))
             .param(SIGNAL.spec("Signal", WAVEFORMS, 0))
             .param(FREQUENCY.spec("Frequency", 20.0, 20_000.0, 440.0))
             .translate(
@@ -149,8 +149,8 @@ const GAIN_FACTOR: NumberParam = NumberParam("gain");
 impl NodeProvider for Gain {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(GAIN, "Gain", NodeKind::Processor)
-            .input(NodeSocket::audio_in("Audio in"))
-            .output(NodeSocket::audio_out("Audio out"))
+            .input(NodeSocket::signal_in("Audio in"))
+            .output(NodeSocket::signal_out("Audio out"))
             .param(GAIN_FACTOR.spec("Gain", 0.0, 2.0, 1.0))
             .translate(
                 "ru",
@@ -196,10 +196,10 @@ const PAN: ChoiceParam = ChoiceParam("pan");
 impl NodeProvider for Mixer {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(MIXER, "Mixer", NodeKind::Processor)
-            .input(NodeSocket::audio_in("Left"))
-            .input(NodeSocket::audio_in("Right"))
-            .input(NodeSocket::audio_in("Side"))
-            .output(NodeSocket::audio_out("Mixed").with_channels(2))
+            .input(NodeSocket::signal_in("Left"))
+            .input(NodeSocket::signal_in("Right"))
+            .input(NodeSocket::signal_in("Side"))
+            .output(NodeSocket::signal_out("Mixed").with_channels(2))
             .param(MODE.spec("Mode", ["mono", "stereo"], 1))
             .param(GAIN_FACTOR.spec("Gain", 0.0, 2.0, 1.0))
             .param(PAN.spec("Pan", ["left", "center", "right"], 1))
@@ -268,7 +268,7 @@ struct Sink;
 impl NodeProvider for Sink {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(SINK, "Sink", NodeKind::Output)
-            .input(NodeSocket::audio_in("Audio").with_channels(2))
+            .input(NodeSocket::signal_in("Audio").with_channels(2))
             .translate(
                 "ru",
                 [(TextKey::Name, "Приёмник"), (TextKey::Input(0), "Аудио")],

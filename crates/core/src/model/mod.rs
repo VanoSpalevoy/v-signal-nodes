@@ -1,3 +1,7 @@
+//! The node model: node types ([`NodeSpec`]) with their sockets, parameters and
+//! translations, the [`NodeFactory`] that validates and holds them, and [`Node`]
+//! instances with their own parameter values.
+
 pub mod node;
 pub mod node_factory;
 pub mod node_socket;

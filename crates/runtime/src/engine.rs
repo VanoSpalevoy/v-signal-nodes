@@ -6,7 +6,7 @@
 //! buffers and calls it: no allocation, no locks (apart from the error path, see
 //! [`RuntimeError`]).
 //!
-//! TODO(P1-4):
+//! TODO(P1-1):
 //! - processors keyed by `NodeId` that survive a new plan (keep phases, delays);
 //! - parallel independent branches for the one-pass mode;
 //! - steps should carry their own sockets once nodes' settings can change them

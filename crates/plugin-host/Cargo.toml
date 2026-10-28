@@ -3,6 +3,7 @@ name = "v-signal-nodes-plugin-host"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 libloading.workspace = true

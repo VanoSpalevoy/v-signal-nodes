@@ -405,8 +405,8 @@ mod tests {
 
     fn gain() -> NodeSpec {
         NodeSpec::new("test.gain", "Gain", NodeKind::Processor)
-            .input(NodeSocket::audio_in("in"))
-            .output(NodeSocket::audio_out("out"))
+            .input(NodeSocket::signal_in("in"))
+            .output(NodeSocket::signal_out("out"))
             .param(ParamSpec::number("gain", "Gain", 0.0, 2.0, 1.0))
             .param(ParamSpec::choice("mode", "Mode", ["soft", "hard"], 0))
             .translate(
@@ -526,14 +526,14 @@ mod tests {
     #[test]
     fn rejects_invalid_specs() {
         let wrong_direction = NodeSpec::new("t.a", "A", NodeKind::Processor)
-            .input(NodeSocket::audio_out("in"))
-            .output(NodeSocket::audio_out("out"));
-        let duplicate_socket = gain().input(NodeSocket::audio_in("in"));
+            .input(NodeSocket::signal_out("in"))
+            .output(NodeSocket::signal_out("out"));
+        let duplicate_socket = gain().input(NodeSocket::signal_in("in"));
         let generator_without_output =
-            NodeSpec::new("t.b", "B", NodeKind::Generator).input(NodeSocket::audio_in("in"));
-        let no_channels = gain().output(NodeSocket::audio_out("silent").with_channels(0));
+            NodeSpec::new("t.b", "B", NodeKind::Generator).input(NodeSocket::signal_in("in"));
+        let no_channels = gain().output(NodeSocket::signal_out("silent").with_channels(0));
         let too_many_channels =
-            gain().output(NodeSocket::audio_out("wide").with_channels(MAX_CHANNELS + 1));
+            gain().output(NodeSocket::signal_out("wide").with_channels(MAX_CHANNELS + 1));
         let empty_id = NodeSpec {
             type_id: " ".into(),
             ..gain()
@@ -562,7 +562,7 @@ mod tests {
         let lfo = NodeSpec::new("t.lfo", "LFO", NodeKind::Generator)
             .color(Rgb::new(200, 200, 90))
             .input(NodeSocket::control_in("rate"))
-            .output(NodeSocket::audio_out("out").with_channels(2));
+            .output(NodeSocket::signal_out("out").with_channels(2));
         assert!(lfo.validate().is_ok());
         // The same key in another language is fine.
         assert!(

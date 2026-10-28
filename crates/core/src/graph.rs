@@ -13,9 +13,9 @@
 //! use v_signal_nodes_core::{Graph, InputRef, Node, NodeKind, NodeSocket, NodeSpec, OutputRef};
 //!
 //! let source = Arc::new(
-//!     NodeSpec::new("my.source", "Source", NodeKind::Generator).output(NodeSocket::audio_out("Out")),
+//!     NodeSpec::new("my.source", "Source", NodeKind::Generator).output(NodeSocket::signal_out("Out")),
 //! );
-//! let sink = Arc::new(NodeSpec::new("my.sink", "Sink", NodeKind::Output).input(NodeSocket::audio_in("In")));
+//! let sink = Arc::new(NodeSpec::new("my.sink", "Sink", NodeKind::Output).input(NodeSocket::signal_in("In")));
 //!
 //! let mut graph = Graph::new();
 //! let a = graph.add(Node::new(source));
@@ -35,7 +35,7 @@ use crate::{AppError, Node, NodeSocket, SocketDirection};
 /// Id of a node in a [`Graph`]: a slot index plus the slot's generation.
 ///
 /// A removed node's slot is reused, but with the next generation, so an id kept
-/// after its node was removed (in a message to the audio thread, an undo step)
+/// after its node was removed (in a message to the real-time thread, an undo step)
 /// never refers to the node that took the slot. Ordered by index, then generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId {
@@ -366,10 +366,10 @@ mod tests {
     /// A node with `inputs` inputs and one output.
     fn node(inputs: usize) -> Node {
         let mut spec = NodeSpec::new("test.node", "Node", NodeKind::Processor)
-            .output(NodeSocket::audio_out("out"))
+            .output(NodeSocket::signal_out("out"))
             .param(ParamSpec::number("gain", "Gain", 0.0, 2.0, 1.0));
         for i in 0..inputs {
-            spec = spec.input(NodeSocket::audio_in(format!("in {i}")));
+            spec = spec.input(NodeSocket::signal_in(format!("in {i}")));
         }
         Node::new(Arc::new(spec))
     }
@@ -477,7 +477,7 @@ mod tests {
             Node::new(Arc::new(spec))
         };
         let control = graph.add(sockets(NodeSocket::output("out", SignalRate::Control)));
-        let stereo = graph.add(sockets(NodeSocket::audio_out("out").with_channels(2)));
+        let stereo = graph.add(sockets(NodeSocket::signal_out("out").with_channels(2)));
 
         assert_eq!(
             graph.connect(out(control), input(ids[0], 0)),

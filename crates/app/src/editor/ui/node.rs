@@ -309,8 +309,8 @@ mod tests {
             "Gain",
             v_signal_nodes_core::NodeKind::Processor,
         )
-        .input(NodeSocket::audio_in("in"))
-        .output(NodeSocket::audio_out("out"))
+        .input(NodeSocket::signal_in("in"))
+        .output(NodeSocket::signal_out("out"))
         .param(ParamSpec::choice("mode", "Mode", ["soft", "hard"], 1))
         .param(ParamSpec::toggle("on", "Enabled", true))
         .translate(

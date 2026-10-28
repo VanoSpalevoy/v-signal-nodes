@@ -8,7 +8,7 @@ use v_signal_nodes_plugin_api::PluginError;
 /// Why an [`Engine`](crate::Engine) couldn't be built or a block couldn't be
 /// processed.
 ///
-/// TODO(P1-4): `PluginError` carries a `String`, so a failing plugin allocates on
+/// TODO(P1-1): `PluginError` carries a `String`, so a failing plugin allocates on
 /// the audio thread; replace with an error code + a message fetched later.
 #[derive(Debug)]
 pub enum RuntimeError {

@@ -3,6 +3,7 @@ name = "v-signal-nodes-plugin-std"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 v-signal-nodes-plugin-api.workspace = true

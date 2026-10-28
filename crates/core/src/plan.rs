@@ -4,7 +4,7 @@
 //! into a flat, immutable list of [`Step`]s in processing order, each naming the
 //! buffers it reads and writes. Both executors (real time and one pass) run the
 //! same plan, so connection rules, order and buffers can't drift apart between
-//! them. Compiling needs no audio and is tested on its own.
+//! them. Compiling needs no device or real-time thread and is tested on its own.
 //!
 //! Buffers: one per connected-or-not output socket, holding that socket's
 //! channels one after another ([`NodeSocket::buffer_len`]). Unconnected inputs
@@ -14,7 +14,7 @@
 //! ([`Input::Converted`]): the executor copies mono into every channel, or
 //! averages the channels into mono, before the step runs.
 //!
-//! Not done yet (TODO P1-4):
+//! Not done yet (TODO P1-1):
 //! - reusing buffers once their last reader has run (fewer, cache-warm buffers);
 //! - one converted buffer per source and shape instead of one per input;
 //! - dropping steps that feed nothing that reaches an output node.
@@ -103,7 +103,7 @@ pub enum CompileError {
     /// The output can't feed the input: different rates, or channel counts that
     /// differ with neither side mono ([`NodeSocket::can_feed`]). [`Graph::connect`]
     /// already refuses such connections; this guards against sockets that change
-    /// after connecting (node settings, P1-5).
+    /// after connecting (node settings, P1-2).
     Incompatible { from: OutputRef, to: InputRef },
 }
 
@@ -204,7 +204,7 @@ mod tests {
     }
 
     fn mono() -> NodeSocket {
-        NodeSocket::audio_out("out")
+        NodeSocket::signal_out("out")
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn mono_meets_channels_through_a_converted_buffer() {
-        let stereo_in = NodeSocket::audio_in("in").with_channels(2);
+        let stereo_in = NodeSocket::signal_in("in").with_channels(2);
         let (graph, from, _) = pair(mono(), stereo_in.clone());
 
         let plan = compile(&graph).unwrap();

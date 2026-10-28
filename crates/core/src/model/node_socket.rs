@@ -5,6 +5,9 @@
 //! [`SignalRate`] (how many values per block) and its number of channels. Together
 //! they fix the size of the socket's buffer in a process call:
 //! [`NodeSocket::buffer_len`].
+//!
+//! Samples are real-valued (`f32`) for now; complex (IQ) and bit formats are
+//! planned (TODO P1-2).
 
 /// Whether a socket receives a signal or produces one. Inputs order before
 /// outputs.
@@ -18,8 +21,9 @@ pub enum SocketDirection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SignalRate {
     /// A value per sample, at the host's sample rate: `frames` values per channel
-    /// in every block. Audio and anything that must be sample-accurate.
-    Audio,
+    /// in every block. Any sampled signal (an ADC stream, a modeled analog
+    /// signal, sound) and anything that must be sample-accurate.
+    Sample,
     /// One value per block (per channel): modulation, levels, slowly changing
     /// controls. Cheap, but only as fine as the block size.
     Control,
@@ -58,14 +62,14 @@ impl NodeSocket {
         }
     }
 
-    /// A mono audio-rate input.
-    pub fn audio_in(name: impl Into<String>) -> Self {
-        Self::input(name, SignalRate::Audio)
+    /// A mono sample-rate input ([`SignalRate::Sample`]), for any sampled signal.
+    pub fn signal_in(name: impl Into<String>) -> Self {
+        Self::input(name, SignalRate::Sample)
     }
 
-    /// A mono audio-rate output.
-    pub fn audio_out(name: impl Into<String>) -> Self {
-        Self::output(name, SignalRate::Audio)
+    /// A mono sample-rate output ([`SignalRate::Sample`]), for any sampled signal.
+    pub fn signal_out(name: impl Into<String>) -> Self {
+        Self::output(name, SignalRate::Sample)
     }
 
     /// A mono control-rate input.
@@ -83,11 +87,11 @@ impl NodeSocket {
         Self { channels, ..self }
     }
 
-    /// Values per channel in a block of `frames`: `frames` at audio rate, one at
+    /// Values per channel in a block of `frames`: `frames` at sample rate, one at
     /// control rate.
     pub fn channel_len(&self, frames: usize) -> usize {
         match self.rate {
-            SignalRate::Audio => frames,
+            SignalRate::Sample => frames,
             SignalRate::Control => 1,
         }
     }
@@ -114,7 +118,7 @@ mod tests {
 
     #[test]
     fn constructors_set_direction_rate_and_channels() {
-        let input = NodeSocket::audio_in("in");
+        let input = NodeSocket::signal_in("in");
         let output = NodeSocket::control_out(String::from("out")).with_channels(2);
 
         assert_eq!(input.direction, SocketDirection::Input);
@@ -127,7 +131,7 @@ mod tests {
 
     #[test]
     fn buffer_sizes_follow_rate_and_channels() {
-        let stereo = NodeSocket::audio_out("out").with_channels(2);
+        let stereo = NodeSocket::signal_out("out").with_channels(2);
         assert_eq!(stereo.channel_len(64), 64);
         assert_eq!(stereo.buffer_len(64), 128);
 
@@ -138,13 +142,13 @@ mod tests {
 
     #[test]
     fn mono_adapts_but_rates_must_match() {
-        let mono = NodeSocket::audio_out("out");
-        let stereo_in = NodeSocket::audio_in("in").with_channels(2);
-        let stereo_out = NodeSocket::audio_out("out").with_channels(2);
-        let quad_in = NodeSocket::audio_in("in").with_channels(4);
+        let mono = NodeSocket::signal_out("out");
+        let stereo_in = NodeSocket::signal_in("in").with_channels(2);
+        let stereo_out = NodeSocket::signal_out("out").with_channels(2);
+        let quad_in = NodeSocket::signal_in("in").with_channels(4);
 
         assert!(mono.can_feed(&stereo_in));
-        assert!(stereo_out.can_feed(&NodeSocket::audio_in("in")));
+        assert!(stereo_out.can_feed(&NodeSocket::signal_in("in")));
         assert!(stereo_out.can_feed(&stereo_in));
         assert!(!stereo_out.can_feed(&quad_in));
         assert!(!mono.can_feed(&NodeSocket::control_in("in")));

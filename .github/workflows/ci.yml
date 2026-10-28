@@ -20,6 +20,15 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # Dependency licenses against the allow-list in deny.toml (no GPL).
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
   # The plugin layer (dynamic libraries, C ABI) is platform-specific, so
   # everything else runs on all three.
   check:

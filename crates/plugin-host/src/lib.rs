@@ -207,8 +207,8 @@ mod tests {
     impl NodeProvider for Gain {
         fn spec(&self) -> NodeSpec {
             NodeSpec::new("test.gain", "Gain", NodeKind::Processor)
-                .input(NodeSocket::audio_in("in"))
-                .output(NodeSocket::audio_out("out"))
+                .input(NodeSocket::signal_in("in"))
+                .output(NodeSocket::signal_out("out"))
                 .param(GAIN.spec("Gain", 0.0, 4.0, 2.0))
         }
 
@@ -338,7 +338,7 @@ mod tests {
                 NodeSpec::new("test.wide", "Wide", NodeKind::Generator)
                     .color(v_signal_nodes_core::Rgb::new(1, 2, 3))
                     .input(NodeSocket::control_in("rate").with_channels(3))
-                    .output(NodeSocket::audio_out("out").with_channels(2))
+                    .output(NodeSocket::signal_out("out").with_channels(2))
             }
 
             fn create_processor(&self) -> Box<dyn NodeProcessor> {

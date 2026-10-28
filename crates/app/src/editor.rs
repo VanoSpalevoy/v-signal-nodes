@@ -25,7 +25,7 @@ use localization::{Language, Text};
 use ui::{NodeKind, NodeWidget, RouteCache, SocketRef};
 
 /// Maximum number of nodes on the canvas.
-const MAX_NODE_COUNT: usize = 256;
+const MAX_NODE_COUNT: usize = 512;
 
 /// The node editor.
 ///

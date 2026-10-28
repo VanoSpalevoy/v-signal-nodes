@@ -2,7 +2,7 @@
 //! messages from the editor. Skeleton: only the messages and how the audio thread
 //! applies them.
 //!
-//! The intended shape (TODO P1-4):
+//! The intended shape (TODO P1-1):
 //!
 //! ```text
 //!  editor thread                               audio thread (device callback)
@@ -22,7 +22,7 @@
 //!   processors only for new nodes, and move the old ones over on the audio thread
 //!   (needs an `Engine` method that swaps processors by `NodeId` without
 //!   allocating);
-//! - which node is the output (P1-4 "output nodes"), and summing several;
+//! - which node is the output (P1-1 "output nodes"), and summing several;
 //! - the audio backend (cpal or similar) lives outside this crate, as a driver
 //!   that calls into it; the engine stays testable offline.
 

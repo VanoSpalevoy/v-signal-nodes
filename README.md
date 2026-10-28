@@ -17,14 +17,15 @@ Build signal processing out of nodes (generators, processors, outputs) wired
 together on a canvas. Every node type comes from a plugin, so the editor itself
 knows no node types and grows without changes to its code.
 
-The signals can be of any kind, with a lean towards electrical ones:
+The signals can be of any kind, with a lean towards electrical and radio ones:
 
 - **analog**: continuous signals, modeled as finely sampled streams;
 - **sampled**: discrete in time, continuous in value;
 - **digital**: discrete in both time and value, down to bit streams.
 
 Sound is just one kind of sampled signal. For now, the model covers sampled
-real-valued streams; formats for complex (IQ) samples and bits are planned.
+real-valued streams; formats for complex (IQ) samples of radio signals and for
+bits are planned.
 
 > [!NOTE]
 > **Status: early development.** You can build graphs in the editor, but nothing
@@ -162,8 +163,8 @@ struct Invert;
 impl NodeProvider for Invert {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new("my.invert", "Invert", NodeKind::Processor)
-            .input(NodeSocket::audio_in("In"))
-            .output(NodeSocket::audio_out("Out"))
+            .input(NodeSocket::signal_in("In"))
+            .output(NodeSocket::signal_out("Out"))
             .param(ENABLED.spec("Enabled", true))
             .translate(
                 "ru",
@@ -206,9 +207,10 @@ export_plugin!(MyPlugin);
   take modulation inputs), a `Processor` needs inputs and outputs, and an
   `Output` needs an input. The role picks the palette group and the default
   color; `NodeSpec::color` sets a color of its own.
-- **Sockets** carry a rate (`SignalRate::Audio`: a value per sample, for any
-  sampled signal, not only sound; `SignalRate::Control`: one value per block) and a channel count
-  (`with_channels`, mono by default). A socket's buffer holds its channels one
+- **Sockets** carry a rate (`SignalRate::Sample`: a value per sample, the
+  signal itself; `SignalRate::Control`: one value per block) and a channel count
+  (`with_channels`, one channel by default). `NodeSocket::signal_in` /
+  `signal_out` and `control_in` / `control_out` build single-channel sockets. A socket's buffer holds its channels one
   after another; `ProcessIo::input_channels` / `output_channels` split it.
 - **Parameters** are declared as key constants (`NumberParam`, `ChoiceParam`,
   `ToggleParam`) that build the `ParamSpec` and read the value with
@@ -227,7 +229,8 @@ export_plugin!(MyPlugin);
   and again when either value changes. That's the place to allocate memory,
   because `process` runs on the real-time thread.
 - `process` gets at most `max_frames` frames per call. Outputs start zeroed.
-- `reset` clears the signal history (phase, filter state) when playback jumps.
+- `reset` clears the signal history (phase, filter state) when processing
+  restarts or jumps.
 - Panics in dynamic-library plugins are caught at the C ABI boundary. This
   requires `panic = "unwind"`, which is the default.
 
@@ -246,7 +249,9 @@ already load a dynamic library, but the editor doesn't call it yet.
 - [x] Graph in `core` with connection checks and generational node ids
 - [ ] Graph runtime: real-time processing and an offline pass
 - [ ] Sample formats beyond real numbers: complex (IQ) and digital (bits)
-- [ ] Device and file I/O: sound cards, ADCs/DACs, signal files
+- [ ] Different sample rates in one graph (decimation, interpolation)
+- [ ] Device and file I/O: SDRs, ADCs/DACs, sound cards, signal files (SigMF)
+- [ ] Bridges to other plugins and devices: SoapySDR, FMI 3.0 models (FMU), CLAP
 - [ ] Editing node parameters
 - [ ] Saving and loading graphs, undo and redo
 - [ ] Selecting and moving several nodes at once
@@ -259,10 +264,11 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+cargo deny check licenses   # needs `cargo install cargo-deny --locked`
 ```
 
-CI runs these checks on Linux, macOS and Windows; the format check runs on
-Linux only. Every `unsafe` block needs a `// SAFETY:` comment
+CI runs these checks on Linux, macOS and Windows; the format and license checks
+run on Linux only. Every `unsafe` block needs a `// SAFETY:` comment
 (`clippy::undocumented_unsafe_blocks`), and all public items of `plugin-api`
 must be documented.
 

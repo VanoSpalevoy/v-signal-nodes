@@ -43,8 +43,8 @@ impl NodeProvider for StubNode {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(STUB_NODE, "Stub", NodeKind::Processor)
             .color(Rgb::new(160, 164, 172))
-            .input(NodeSocket::audio_in("In"))
-            .output(NodeSocket::audio_out("Out"))
+            .input(NodeSocket::signal_in("In"))
+            .output(NodeSocket::signal_out("Out"))
             .param(LEVEL.spec("Level", 0.0, 1.0, 0.5))
             .param(MODE.spec("Mode", ["idle", "busy"], 0))
             .param(BYPASS.spec("Bypass", true))

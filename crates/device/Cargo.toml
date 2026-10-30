@@ -1,12 +1,13 @@
 [package]
-name = "v-signal-nodes-plugin-stub"
+name = "v-signal-nodes-device"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-v-signal-nodes-plugin-api.workspace = true
+cpal.workspace = true
+v-signal-nodes-runtime.workspace = true
 
 [lints]
 workspace = true

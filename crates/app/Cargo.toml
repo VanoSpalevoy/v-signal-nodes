@@ -15,9 +15,11 @@ eframe.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 v-signal-nodes-core = { workspace = true, features = ["serde"] }
+v-signal-nodes-device.workspace = true
+v-signal-nodes-runtime.workspace = true
 v-signal-nodes-plugin-host.workspace = true
 v-signal-nodes-plugin-std.workspace = true
-v-signal-nodes-plugin-stub.workspace = true
+v-signal-nodes-plugin-stub-oscillograph.workspace = true
 
 # The native menu bar at the top of the screen (`editor::native_menu`).
 [target.'cfg(target_os = "macos")'.dependencies]

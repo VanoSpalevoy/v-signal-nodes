@@ -4,6 +4,8 @@
 //! - a node-limit warning when the last add failed (see `node_limit_reached`);
 //! - a warning when the last connection was refused, with the reason (a cycle or
 //!   sockets that don't fit, `connection_refused`);
+//! - why the graph can't run, before anyone tries (nothing for an empty canvas: there
+//!   is nothing to run yet), and what the last run came to (see `editor::execution`);
 //! - the selected source socket, or "Ready" when nothing is selected and there
 //!   are no warnings;
 //! - every connection as `from_node Output n -> to_node Input m`, sorted by source
@@ -13,6 +15,7 @@
 //! numbers 1-based. Read-only: the panel never changes the app state.
 
 use eframe::egui;
+use v_signal_nodes_core::CompileError;
 
 use super::{TEXT_DIM, caption, panel_frame};
 use crate::editor::{Language, MAX_NODE_COUNT, SocketRef, Text, VSignalNodesApp};
@@ -40,6 +43,7 @@ pub(super) fn show(app: &VSignalNodesApp, ui: &mut egui::Ui) {
             if let Some(reason) = app.connection_refused {
                 ui.colored_label(ui.visuals().error_fg_color, app.language.text(reason));
             }
+            show_execution(app, ui);
             if let Some(source) = app.pending_source {
                 ui.label(format!(
                     "{} {}",
@@ -67,6 +71,46 @@ pub(super) fn show(app: &VSignalNodesApp, ui: &mut egui::Ui) {
                     }
                 });
         });
+}
+
+/// Why the graph can't run and how the last run went.
+fn show_execution(app: &VSignalNodesApp, ui: &mut egui::Ui) {
+    let execution = &app.execution;
+    let language = app.language;
+    match execution.compile_error() {
+        // Normal while building a graph, so not shown as an error.
+        Some(CompileError::NoOutput) if !app.graph.is_empty() => {
+            ui.colored_label(TEXT_DIM, language.text(Text::NoOutputNode));
+        }
+        Some(error @ CompileError::Incompatible { .. }) => {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("{}: {error}", language.text(Text::GraphCantRun)),
+            );
+        }
+        _ => {}
+    }
+    if execution.is_running_realtime() {
+        ui.label(language.text(Text::RunningRealtime));
+    }
+    if execution.is_running_one_pass() {
+        ui.label(language.text(Text::RunningOnePass));
+    }
+    if let Some(summary) = execution.one_pass_result() {
+        ui.label(format!(
+            "{}: {} / {:.0} ms / {:.3}",
+            language.text(Text::OnePassResult),
+            summary.frames,
+            summary.elapsed.as_secs_f64() * 1000.0,
+            summary.peak,
+        ));
+    }
+    if let Some(failure) = execution.failure() {
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            format!("{}: {failure}", language.text(Text::RunFailed)),
+        );
+    }
 }
 
 /// `socket` as `node Side n`, e.g. `3 Output 1` (node number as in the node

@@ -22,7 +22,7 @@
 //! [`ParamValue`] and the typed parameter keys ([`ParamKey`], [`NumberParam`],
 //! [`ChoiceParam`], [`ToggleParam`]). A change to any of them is a change to the
 //! plugin API. The rest of `core` (the graph-side `Node`, `NodeFactory`,
-//! `AppError`) is the host's business and isn't exposed; plugins report errors
+//! `Error`) is the host's business and isn't exposed; plugins report errors
 //! with [`PluginError`]. Dynamic libraries don't see the Rust types at all, only
 //! their C layout in [`ffi`], so those types may change without breaking the ABI
 //! as long as [`ffi`] doesn't.
@@ -116,7 +116,7 @@ impl fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
-impl From<PluginError> for v_signal_nodes_core::AppError {
+impl From<PluginError> for v_signal_nodes_core::Error {
     fn from(err: PluginError) -> Self {
         Self::Plugin(err.0)
     }

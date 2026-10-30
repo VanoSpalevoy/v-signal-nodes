@@ -3,10 +3,11 @@ resolver = "3"
 members = [
     "crates/core",
     "crates/runtime",
+    "crates/device",
     "crates/plugin-api",
     "crates/plugin-host",
     "crates/plugin-std",
-    "crates/plugin-stub",
+    "crates/plugin-stub-oscillograph",
     "crates/app",
 ]
 
@@ -19,17 +20,24 @@ license = "BSD-3-Clause"
 [workspace.dependencies]
 egui = "0.37.0"
 eframe = "0.37.0"
+# The first device driver (`crates/device`). On Linux it links ALSA's libasound
+# (LGPL-2.1) dynamically, through `alsa-sys`; no JACK (off by default).
+cpal = "0.18.2"
 libloading = "0.9.0"
+# Lock-free queues to and from the real-time thread (`runtime::realtime`,
+# `plugin-stub-oscillograph`).
+rtrb = "0.4.1"
 # Only the macOS menu bar uses it; the default `gtk3` feature is Linux-only.
 muda = { version = "0.21.2", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 v-signal-nodes-core = { path = "crates/core" }
 v-signal-nodes-runtime = { path = "crates/runtime" }
+v-signal-nodes-device = { path = "crates/device" }
 v-signal-nodes-plugin-api = { path = "crates/plugin-api" }
 v-signal-nodes-plugin-host = { path = "crates/plugin-host" }
 v-signal-nodes-plugin-std = { path = "crates/plugin-std" }
-v-signal-nodes-plugin-stub = { path = "crates/plugin-stub" }
+v-signal-nodes-plugin-stub-oscillograph = { path = "crates/plugin-stub-oscillograph" }
 
 [workspace.lints.clippy]
 # Every `unsafe` block carries a `// SAFETY:` comment; keep it that way.

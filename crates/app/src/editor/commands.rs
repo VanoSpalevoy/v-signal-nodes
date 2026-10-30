@@ -39,9 +39,9 @@ pub(super) enum Command {
     ZoomOut,
     /// Resets the canvas zoom to 1.
     ResetZoom,
-    /// Starts or stops real-time processing (blocks, for the audio device).
+    /// Starts or stops real-time processing on the output device.
     RunRealtime,
-    /// Runs the graph once with asynchronous hand-off between nodes.
+    /// Runs the graph once on background threads, independent branches in parallel.
     RunAsync,
 }
 
@@ -138,14 +138,20 @@ impl VSignalNodesApp {
             Command::ZoomIn => self.scale < *SCALE_RANGE.end(),
             Command::ZoomOut => self.scale > *SCALE_RANGE.start(),
             Command::ResetZoom => self.scale != 1.0,
-            // No runtime yet.
-            Command::RunRealtime | Command::RunAsync => false,
+            // Stopping is always possible.
+            Command::RunRealtime => {
+                self.execution.is_running_realtime() || self.execution.compile_error().is_none()
+            }
+            Command::RunAsync => {
+                !self.execution.is_running_one_pass() && self.execution.compile_error().is_none()
+            }
         }
     }
 
     /// Runs `command` if [`can_execute`](Self::can_execute) allows it. Clipboard
     /// commands do nothing here: see the module docs.
     pub(super) fn execute(&mut self, command: Command) {
+        self.refresh_compile_status();
         if !self.can_execute(command) {
             return;
         }
@@ -155,7 +161,8 @@ impl VSignalNodesApp {
             Command::ZoomIn => self.set_scale(self.scale + SCALE_STEP),
             Command::ZoomOut => self.set_scale(self.scale - SCALE_STEP),
             Command::ResetZoom => self.set_scale(1.0),
-            Command::RunRealtime | Command::RunAsync => {}
+            Command::RunRealtime => self.toggle_realtime(),
+            Command::RunAsync => self.start_one_pass(),
         }
     }
 
@@ -247,7 +254,7 @@ mod tests {
     fn unavailable_commands_do_nothing() {
         let mut app = VSignalNodesApp::default();
         assert!(!app.can_execute(Command::SnapToGrid), "no nodes");
-        assert!(!app.can_execute(Command::RunRealtime), "no runtime");
+        assert!(!app.can_execute(Command::RunRealtime), "no output node");
         assert!(!app.can_execute(Command::Copy), "no selection");
         app.execute(Command::RunRealtime);
         assert_eq!(app.copy_selection(), None);

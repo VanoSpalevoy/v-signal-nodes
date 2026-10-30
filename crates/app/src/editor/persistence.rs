@@ -6,10 +6,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use eframe::egui;
-use v_signal_nodes_core::{AppError, Graph, InputRef, OutputRef};
+use v_signal_nodes_core::{Error, Graph, InputRef, OutputRef};
 
 use super::{MAX_NODE_COUNT, RouteCache, VSignalNodesApp, ui};
-use crate::document::{DocConnection, DocNode, Document};
+use crate::document::{DocConnection, DocNode, Document, DocumentError};
 
 impl VSignalNodesApp {
     /// The graph as a [`Document`] for saving: nodes in paint order with their
@@ -63,49 +63,45 @@ impl VSignalNodesApp {
     ///
     /// Clears the transient state: selection, drag, warnings and routes.
     #[allow(dead_code, reason = "no Open command in the UI yet")]
-    pub(crate) fn open_document(&mut self, document: &Document) -> Result<(), AppError> {
+    pub(crate) fn open_document(&mut self, document: &Document) -> Result<(), DocumentError> {
         let missing: Vec<_> = document
             .used_plugins
             .iter()
             .filter(|name| self.plugins.plugin(name).is_none())
-            .map(String::as_str)
+            .cloned()
             .collect();
         if !missing.is_empty() {
-            return Err(AppError::Plugin(format!(
-                "the document needs plugins that aren't loaded: {}",
-                missing.join(", ")
-            )));
+            return Err(DocumentError::MissingPlugins(missing));
         }
 
         if document.nodes.len() > MAX_NODE_COUNT {
-            return Err(AppError::InvalidInput(format!(
-                "the document has {} nodes, more than {MAX_NODE_COUNT}",
-                document.nodes.len()
-            )));
+            return Err(DocumentError::TooManyNodes {
+                count: document.nodes.len(),
+                limit: MAX_NODE_COUNT,
+            });
         }
         let mut by_doc_id = BTreeMap::new();
         for doc_node in &document.nodes {
             if by_doc_id.insert(doc_node.id, doc_node).is_some() {
-                return Err(AppError::InvalidInput(format!(
-                    "node ID {} is repeated",
-                    doc_node.id
-                )));
+                return Err(DocumentError::RepeatedNode(doc_node.id));
             }
         }
         let mut graph = Graph::new();
         let mut ids = HashMap::new();
         for (&doc_id, doc_node) in &by_doc_id {
-            let kind = self.kind_of(&doc_node.type_id).ok_or_else(|| {
-                AppError::InvalidInput(format!(
-                    "node {doc_id} has unknown type '{}'",
-                    doc_node.type_id
-                ))
-            })?;
+            let node_error = |error| DocumentError::Node {
+                node: doc_id,
+                error,
+            };
+            let kind = self
+                .kind_of(&doc_node.type_id)
+                .ok_or_else(|| node_error(Error::UnknownNodeType(doc_node.type_id.clone())))?;
             let params = doc_node
                 .params
                 .iter()
                 .map(|(param_id, &value)| (param_id.as_str(), value));
-            ids.insert(doc_id, graph.add(self.build_node(&kind, params)?));
+            let node = self.build_node(&kind, params).map_err(node_error)?;
+            ids.insert(doc_id, graph.add(node));
         }
 
         // Paint order is the document order; each node keeps clear of the earlier ones.
@@ -124,25 +120,25 @@ impl VSignalNodesApp {
 
         for connection in &document.connections {
             let node = |doc_id: usize| {
-                ids.get(&doc_id).copied().ok_or_else(|| {
-                    AppError::InvalidInput(format!(
-                        "connection {connection:?} refers to a missing node"
-                    ))
-                })
+                ids.get(&doc_id)
+                    .copied()
+                    .ok_or(DocumentError::ConnectionToMissingNode(*connection))
             };
             let from = OutputRef::new(node(connection.from_node)?, connection.from_output);
             let to = InputRef::new(node(connection.to_node)?, connection.to_input);
             if graph.source(to).is_some() {
-                return Err(AppError::InvalidInput(format!(
-                    "connection {connection:?} feeds an input twice"
-                )));
+                return Err(DocumentError::InputFedTwice(*connection));
             }
-            graph.connect(from, to).map_err(|err| {
-                AppError::InvalidInput(format!("connection {connection:?}: {err}"))
-            })?;
+            graph
+                .connect(from, to)
+                .map_err(|error| DocumentError::Connection {
+                    connection: *connection,
+                    error,
+                })?;
         }
 
         self.graph = graph;
+        self.mark_graph_replaced();
         self.positions = positions;
         self.z_order = z_order;
         self.node_limit_reached = false;
@@ -161,17 +157,17 @@ mod tests {
     use crate::editor::tests::assert_apart;
     use v_signal_nodes_core::{NodeId, ParamValue};
     use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE};
-    use v_signal_nodes_plugin_stub::STUB_NODE;
+    use v_signal_nodes_plugin_stub_oscillograph::OSCILLOGRAPH;
 
-    /// An app with source 0 → gain 1 → mixer 2 (inputs 0 and 1) and a stub node 3,
-    /// and their ids.
+    /// An app with source 0 → gain 1 → mixer 2 (inputs 0 and 1) and an oscillograph
+    /// node 3, and their ids.
     fn sample_graph() -> (VSignalNodesApp, Vec<NodeId>) {
         let mut app = VSignalNodesApp::default();
         let ids: Vec<_> = [
             (SOURCE, 0.0, 0.0),
             (GAIN, 250.0, 0.0),
             (MIXER, 500.0, 0.0),
-            (STUB_NODE, 250.0, 300.0),
+            (OSCILLOGRAPH, 250.0, 300.0),
         ]
         .into_iter()
         .map(|(type_id, x, y)| {
@@ -204,7 +200,7 @@ mod tests {
         app.raise_node(ids[0]);
         let document = app.to_document();
 
-        assert_eq!(document.used_plugins, ["std", "stub"]);
+        assert_eq!(document.used_plugins, ["std", "stub-oscillograph"]);
         assert_eq!(document.nodes.len(), 4);
         assert_eq!(document.nodes[3].id, 0, "paint order is kept");
         assert_eq!(document.connections.len(), 3);

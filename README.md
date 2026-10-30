@@ -28,10 +28,11 @@ real-valued streams; formats for complex (IQ) samples of radio signals and for
 bits are planned.
 
 > [!NOTE]
-> **Status: early development.** You can build graphs in the editor, but nothing
-> runs yet: the graph runtime isn't connected to the editor. You can't edit parameters or save
-> graphs yet either. The plugin API is still changing, and plugins built for one
-> API version are refused by hosts built for another.
+> **Status: early development.** You can build graphs in the editor and run them:
+> in real time on the default output device, or once on background threads, which
+> for now only reports the result in the debug panel. You can't edit parameters or
+> save graphs yet. The plugin API is still changing, and plugins built for one API
+> version are refused by hosts built for another.
 
 ## Contents
 
@@ -105,10 +106,13 @@ why a connection was refused.
 flowchart LR
     app["app<br/>egui editor"] --> host["plugin-host<br/>plugin loading"]
     app --> core["core<br/>node model"]
+    app --> device["device<br/>output driver"]
+    device --> runtime["runtime<br/>runs compiled plans"]
+    runtime --> api
     host --> api["plugin-api<br/>contract + C ABI"]
     api --> core
     std["plugin-std<br/>std.*"] --> api
-    stub["plugin-stub"] --> api
+    stub["plugin-stub-oscillograph"] --> api
     app --> std
     app --> stub
     dylib["your plugin<br/>.dll / .so / .dylib"] -. C ABI .-> host
@@ -119,10 +123,11 @@ flowchart LR
 | `crates/app`          | The egui/eframe editor                                         |
 | `crates/core`         | Node model and graph: node specs, parameters, sockets, translations, connection rules; no dependencies |
 | `crates/plugin-api`   | The plugin contract and its C ABI (`ffi`)                      |
-| `crates/plugin-host`  | Loads plugins (linked or from a dynamic library) and builds nodes |
+| `crates/plugin-host`  | Loads plugins (linked or from a dynamic library), builds nodes and their processors |
 | `crates/plugin-std`   | The standard nodes (`std.*`), the reference plugin            |
-| `crates/plugin-stub`  | A do-nothing node used to test the plugin → editor path       |
-| `crates/runtime`      | Graph processing: runs a compiled plan block by block; early skeleton |
+| `crates/plugin-stub-oscillograph` | A placeholder oscillograph with no graphics: passes the signal through and prints min/max/RMS to stdout |
+| `crates/runtime`      | Graph processing: runs a compiled plan, on a real-time thread or in one parallel pass |
+| `crates/device`       | The first device driver: the default output, through `cpal`    |
 
 API docs: `cargo doc --workspace --no-deps --open`.
 
@@ -272,3 +277,6 @@ must be documented.
 ## License
 
 BSD 3-Clause; see [LICENSE](LICENSE).
+
+On Linux the output driver links ALSA's `libasound` (LGPL-2.1) dynamically; it is a
+system library and not part of this program.

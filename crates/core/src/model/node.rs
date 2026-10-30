@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::{AppError, NodeSocket, NodeSpec, ParamValue, SocketDirection};
+use crate::{Error, NodeSocket, NodeSpec, ParamValue, SocketDirection};
 
 /// One node: the spec it was built from and its current parameter values. Its id
 /// is given by the [`Graph`](crate::Graph) that holds it.
@@ -56,17 +56,22 @@ impl Node {
     /// Sets parameter `id` to `value`. Fails, leaving the node unchanged, if the
     /// spec has no such parameter or doesn't accept the value
     /// ([`ParamSpec::accepts`](crate::ParamSpec::accepts)).
-    pub fn set_param(&mut self, id: &str, value: ParamValue) -> Result<(), AppError> {
-        match self.spec.param_index(id) {
-            Some(index) if self.spec.params[index].accepts(value) => {
-                self.params[index] = value;
-                Ok(())
-            }
-            _ => Err(AppError::InvalidInput(format!(
-                "{}: parameter '{id}' is unknown or out of range",
-                self.type_id()
-            ))),
+    pub fn set_param(&mut self, id: &str, value: ParamValue) -> Result<(), Error> {
+        let type_id = || self.type_id().to_owned();
+        let Some(index) = self.spec.param_index(id) else {
+            return Err(Error::UnknownParam {
+                type_id: type_id(),
+                param: id.to_owned(),
+            });
+        };
+        if !self.spec.params[index].accepts(value) {
+            return Err(Error::ParamRejected {
+                type_id: type_id(),
+                param: id.to_owned(),
+            });
         }
+        self.params[index] = value;
+        Ok(())
     }
 }
 
@@ -118,12 +123,18 @@ mod tests {
         node.set_param("gain", ParamValue::Number(2.0)).unwrap();
         assert_eq!(node.param("gain"), Some(ParamValue::Number(2.0)));
 
-        assert!(node.set_param("gain", ParamValue::Number(3.0)).is_err());
-        assert!(node.set_param("gain", ParamValue::Toggle(false)).is_err());
-        assert!(
-            node.set_param("missing", ParamValue::Toggle(false))
-                .is_err()
-        );
+        assert!(matches!(
+            node.set_param("gain", ParamValue::Number(3.0)),
+            Err(Error::ParamRejected { .. })
+        ));
+        assert!(matches!(
+            node.set_param("gain", ParamValue::Toggle(false)),
+            Err(Error::ParamRejected { .. })
+        ));
+        assert!(matches!(
+            node.set_param("missing", ParamValue::Toggle(false)),
+            Err(Error::UnknownParam { .. })
+        ));
         assert_eq!(node.param("gain"), Some(ParamValue::Number(2.0)));
         assert_eq!(node.param("missing"), None);
     }

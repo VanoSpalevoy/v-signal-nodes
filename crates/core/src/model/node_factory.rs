@@ -10,10 +10,10 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use crate::AppError;
 use crate::model::{
     MAX_CHANNELS, Node, NodeKind, NodeSocket, ParamKind, ParamSpec, ParamValue, SocketDirection,
 };
+use crate::{Error, SpecProblem};
 
 /// The description of one node type, as provided by a plugin.
 ///
@@ -257,38 +257,45 @@ impl NodeSpec {
     /// processors both; a generator may still have inputs, e.g. modulation),
     /// valid parameters with unique ids, and translations of existing labels, at
     /// most one per language and label.
-    pub fn validate(&self) -> Result<(), AppError> {
-        let invalid = |message: String| {
-            Err(AppError::InvalidInput(format!(
-                "node spec '{}': {message}",
-                self.type_id
-            )))
-        };
+    pub fn validate(&self) -> Result<(), Error> {
+        self.find_problem().map_or(Ok(()), |problem| {
+            Err(Error::InvalidSpec {
+                type_id: self.type_id.clone(),
+                problem,
+            })
+        })
+    }
 
+    /// The first rule of [`validate`](Self::validate) this spec breaks, if any.
+    fn find_problem(&self) -> Option<SpecProblem> {
         if self.type_id.trim().is_empty() {
-            return invalid("empty type id".into());
+            return Some(SpecProblem::EmptyTypeId);
         }
         if self.name.trim().is_empty() {
-            return invalid("empty name".into());
+            return Some(SpecProblem::EmptyName);
         }
 
         for direction in [SocketDirection::Input, SocketDirection::Output] {
             let mut names = HashSet::new();
             for socket in self.sockets(direction) {
+                let name = || socket.name.clone();
                 if socket.direction != direction {
-                    return invalid(format!(
-                        "socket '{}' listed as {direction:?} but is {:?}",
-                        socket.name, socket.direction
-                    ));
+                    return Some(SpecProblem::SocketInWrongList {
+                        socket: name(),
+                        listed: direction,
+                    });
                 }
                 if !names.insert(socket.name.as_str()) {
-                    return invalid(format!("duplicate {direction:?} socket '{}'", socket.name));
+                    return Some(SpecProblem::DuplicateSocket {
+                        socket: name(),
+                        direction,
+                    });
                 }
                 if !(1..=MAX_CHANNELS).contains(&socket.channels) {
-                    return invalid(format!(
-                        "socket '{}' has {} channels, not 1..={MAX_CHANNELS}",
-                        socket.name, socket.channels
-                    ));
+                    return Some(SpecProblem::ChannelCount {
+                        socket: name(),
+                        channels: socket.channels,
+                    });
                 }
             }
         }
@@ -300,21 +307,23 @@ impl NodeSpec {
             NodeKind::Output => has_inputs,
         };
         if !fits_kind {
-            return invalid(format!(
-                "{:?} node with {} input(s) and {} output(s)",
-                self.kind,
-                self.inputs.len(),
-                self.outputs.len()
-            ));
+            return Some(SpecProblem::SocketsDontFitKind {
+                kind: self.kind,
+                inputs: self.inputs.len(),
+                outputs: self.outputs.len(),
+            });
         }
 
         let mut ids = HashSet::new();
         for param in &self.params {
-            if let Err(err) = param.validate() {
-                return invalid(err.to_string());
+            if let Err(problem) = param.validate() {
+                return Some(SpecProblem::Param {
+                    param: param.id.clone(),
+                    problem,
+                });
             }
             if !ids.insert(param.id.as_str()) {
-                return invalid(format!("duplicate parameter '{}'", param.id));
+                return Some(SpecProblem::DuplicateParam(param.id.clone()));
             }
         }
 
@@ -322,17 +331,19 @@ impl NodeSpec {
         for translation in &self.translations {
             let key = translation.key.borrowed();
             if self.english(key).is_none() {
-                return invalid(format!("translation of a missing label {key:?}"));
+                return Some(SpecProblem::TranslationOfMissingLabel(
+                    translation.key.clone(),
+                ));
             }
             if !translated.insert((translation.language.as_str(), key)) {
-                return invalid(format!(
-                    "duplicate '{}' translation of {key:?}",
-                    translation.language
-                ));
+                return Some(SpecProblem::DuplicateTranslation {
+                    language: translation.language.clone(),
+                    key: translation.key.clone(),
+                });
             }
         }
 
-        Ok(())
+        None
     }
 }
 
@@ -354,10 +365,10 @@ impl NodeFactory {
 
     /// Validates and registers `spec`. Fails if the spec is invalid or its type id
     /// is already taken.
-    pub fn register(&mut self, spec: NodeSpec) -> Result<(), AppError> {
+    pub fn register(&mut self, spec: NodeSpec) -> Result<(), Error> {
         spec.validate()?;
         match self.specs.entry(spec.type_id.clone()) {
-            Entry::Occupied(_) => Err(already_registered(&spec.type_id)),
+            Entry::Occupied(_) => Err(Error::DuplicateNodeType(spec.type_id)),
             Entry::Vacant(entry) => {
                 entry.insert(Arc::new(spec));
                 Ok(())
@@ -368,9 +379,9 @@ impl NodeFactory {
     /// Moves every spec of `other` into this factory, all or nothing: fails
     /// without changing anything if one of its type ids is already taken. The
     /// specs were validated when `other` registered them.
-    pub fn append(&mut self, other: NodeFactory) -> Result<(), AppError> {
+    pub fn append(&mut self, other: NodeFactory) -> Result<(), Error> {
         if let Some(type_id) = other.specs.keys().find(|id| self.specs.contains_key(*id)) {
-            return Err(already_registered(type_id));
+            return Err(Error::DuplicateNodeType(type_id.clone()));
         }
         self.specs.extend(other.specs);
         Ok(())
@@ -387,16 +398,12 @@ impl NodeFactory {
     }
 
     /// Builds a node of type `type_id`, with every parameter at its default.
-    pub fn build_node(&self, type_id: &str) -> Result<Node, AppError> {
+    pub fn build_node(&self, type_id: &str) -> Result<Node, Error> {
         let spec = self
             .spec(type_id)
-            .ok_or_else(|| AppError::InvalidInput(format!("unknown node type '{type_id}'")))?;
+            .ok_or_else(|| Error::UnknownNodeType(type_id.to_owned()))?;
         Ok(Node::new(Arc::clone(spec)))
     }
-}
-
-fn already_registered(type_id: &str) -> AppError {
-    AppError::InvalidInput(format!("node type '{type_id}' is already registered"))
 }
 
 #[cfg(test)]

@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 
-use crate::{AppError, Node, NodeSocket, SocketDirection};
+use crate::{Node, NodeSocket, SocketDirection};
 
 /// Id of a node in a [`Graph`]: a slot index plus the slot's generation.
 ///
@@ -119,12 +119,6 @@ impl fmt::Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
-impl From<GraphError> for AppError {
-    fn from(err: GraphError) -> Self {
-        Self::InvalidInput(err.to_string())
-    }
-}
-
 /// One node slot: the node in it, if any, and its generation.
 #[derive(Clone, Debug, PartialEq)]
 struct Slot {
@@ -133,7 +127,7 @@ struct Slot {
 }
 
 /// Nodes and the connections between them; acyclic, each input fed at most once.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct Graph {
     slots: Vec<Slot>,
     /// Indices of the empty slots; the lowest is reused first.
@@ -142,11 +136,31 @@ pub struct Graph {
     len: usize,
     /// Connections keyed by the input, so each input has at most one source.
     connections: BTreeMap<InputRef, OutputRef>,
+    /// See [`revision`](Self::revision).
+    revision: u64,
+}
+
+/// Two graphs are equal when they hold the same content, however they got there.
+impl PartialEq for Graph {
+    fn eq(&self, other: &Self) -> bool {
+        self.slots == other.slots
+            && self.free == other.free
+            && self.len == other.len
+            && self.connections == other.connections
+    }
 }
 
 impl Graph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Grows with every change to this graph, so whoever derives something from it
+    /// (a compiled plan) can tell it's out of date without comparing the content.
+    /// [`node_mut`](Self::node_mut) counts as a change. Only comparable between
+    /// states of one graph: a different graph may have the same number.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Number of nodes.
@@ -160,6 +174,7 @@ impl Graph {
 
     /// Adds `node` in the lowest free slot and returns its new id.
     pub fn add(&mut self, node: Node) -> NodeId {
+        self.revision += 1;
         self.len += 1;
         if let Some(index) = self.free.pop_first() {
             let slot = &mut self.slots[index as usize];
@@ -188,6 +203,7 @@ impl Graph {
             return None;
         }
         let node = slot.node.take()?;
+        self.revision += 1;
         // A wrap after 2^32 removals from one slot is not a practical concern.
         slot.generation = slot.generation.wrapping_add(1);
         self.free.insert(id.index);
@@ -213,11 +229,14 @@ impl Graph {
 
     /// Node `id`, to change its parameters ([`Node::set_param`]).
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
-        self.slots
+        let node = self
+            .slots
             .get_mut(id.index())
             .filter(|slot| slot.generation == id.generation)?
             .node
-            .as_mut()
+            .as_mut()?;
+        self.revision += 1;
+        Some(node)
     }
 
     /// Every node with its id, by id.
@@ -266,19 +285,26 @@ impl Graph {
         if self.reaches(to.node, from.node) {
             return Err(GraphError::Cycle);
         }
+        self.revision += 1;
         Ok(self.connections.insert(to, from))
     }
 
     /// Removes the connection into input `to`; returns its source, if it had one.
     pub fn disconnect(&mut self, to: InputRef) -> Option<OutputRef> {
-        self.connections.remove(&to)
+        let source = self.connections.remove(&to)?;
+        self.revision += 1;
+        Some(source)
     }
 
     /// Removes every connection from output `from`; returns how many there were.
     pub fn disconnect_output(&mut self, from: OutputRef) -> usize {
         let before = self.connections.len();
         self.connections.retain(|_, source| *source != from);
-        before - self.connections.len()
+        let removed = before - self.connections.len();
+        if removed > 0 {
+            self.revision += 1;
+        }
+        removed
     }
 
     /// The output feeding input `to`, if any.

@@ -5,16 +5,18 @@
 //! transient UI state (socket selection, language, zoom). Rendering and input
 //! handling live in the [`ui`] module, which reads this state directly but changes
 //! it only through the methods here, so the editor rules can be unit-tested
-//! without egui. Saving and opening documents is in [`persistence`].
+//! without egui. Saving and opening documents is in [`persistence`], running the
+//! graph in [`execution`].
 
 use eframe::egui;
 use std::collections::HashMap;
 use v_signal_nodes_core::{
-    AppError, Graph, GraphError, InputRef, Node, NodeId, OutputRef, ParamValue,
+    Error, Graph, GraphError, InputRef, Node, NodeId, OutputRef, ParamValue,
 };
 use v_signal_nodes_plugin_host::PluginHost;
 
 mod commands;
+mod execution;
 mod localization;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -78,6 +80,8 @@ pub struct VSignalNodesApp {
     plugins: PluginHost,
     /// Every node type of `plugins`, in palette order (see [`palette`]).
     palette: Vec<NodeKind>,
+    /// Compile status and whatever is running the graph.
+    execution: execution::Execution,
     /// The system menu bar, which replaces the egui one on macOS. `None` in
     /// tests, or if installing it failed (then the egui menu bar is shown).
     #[cfg(target_os = "macos")]
@@ -112,20 +116,22 @@ impl Default for VSignalNodesApp {
             routes: RouteCache::default(),
             plugins,
             palette,
+            execution: execution::Execution::default(),
             #[cfg(target_os = "macos")]
             native_menu: None,
         }
     }
 }
 
-/// A plugin host with the plugins linked into the editor: `std` and the `stub`
-/// placeholder. They are part of the build, so failing to load one is a bug.
+/// A plugin host with the plugins linked into the editor: `std` and the
+/// `stub-oscillograph` placeholder. They are part of the build, so failing to load
+/// one is a bug.
 fn builtin_plugins() -> PluginHost {
     let mut host = PluginHost::new();
     host.load(&v_signal_nodes_plugin_std::StdPlugin)
         .expect("the std plugin loads");
-    host.load(&v_signal_nodes_plugin_stub::StubPlugin)
-        .expect("the stub plugin loads");
+    host.load(&v_signal_nodes_plugin_stub_oscillograph::StubOscillographPlugin)
+        .expect("the stub-oscillograph plugin loads");
     host
 }
 
@@ -206,16 +212,16 @@ impl VSignalNodesApp {
     /// A new node of `kind`, with `params` (by parameter id) instead of their
     /// defaults.
     ///
-    /// The node is built by `plugins` (a `core::Node` with its processor). The
-    /// processor is dropped: there is no runtime to run it yet. Fails if the host
-    /// can't build the node (an unknown type id), or a parameter is unknown or its
-    /// value not accepted by the spec (`core::Node::set_param`).
+    /// The node is built by `plugins` (a `core::Node`; its processor is created only
+    /// when it runs, see [`execution`]). Fails if the host can't build the node (an
+    /// unknown type id), or a parameter is unknown or its value not accepted by the
+    /// spec (`core::Node::set_param`).
     fn build_node<'a>(
         &self,
         kind: &NodeKind,
         params: impl IntoIterator<Item = (&'a str, ParamValue)>,
-    ) -> Result<Node, AppError> {
-        let mut node = self.plugins.build_node(&kind.spec().type_id)?.node;
+    ) -> Result<Node, Error> {
+        let mut node = self.plugins.build_node(&kind.spec().type_id)?;
         for (param_id, value) in params {
             node.set_param(param_id, value)?;
         }
@@ -418,6 +424,7 @@ impl VSignalNodesApp {
 
 impl eframe::App for VSignalNodesApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.update_execution(ui.ctx());
         ui::render(self, ui);
         #[cfg(target_os = "macos")]
         if let Some(mut menu) = self.native_menu.take() {
@@ -451,7 +458,7 @@ impl eframe::App for VSignalNodesApp {
 mod tests {
     use super::*;
     use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE};
-    use v_signal_nodes_plugin_stub::STUB_NODE;
+    use v_signal_nodes_plugin_stub_oscillograph::OSCILLOGRAPH;
 
     /// Adds a node of type `type_id` at `pos` (or the nearest free spot).
     fn add(app: &mut VSignalNodesApp, type_id: &str, pos: egui::Pos2) -> NodeId {
@@ -797,22 +804,22 @@ mod tests {
             .map(|kind| kind.spec().type_id.as_str())
             .collect();
 
-        assert_eq!(type_ids, [SOURCE, GAIN, MIXER, STUB_NODE, SINK]);
+        assert_eq!(type_ids, [SOURCE, GAIN, MIXER, OSCILLOGRAPH, SINK]);
     }
 
     #[test]
     fn nodes_are_built_by_core_and_placed() {
         let mut app = VSignalNodesApp::default();
-        let stub = app.kind_of(STUB_NODE).unwrap();
+        let kind = app.kind_of(OSCILLOGRAPH).unwrap();
 
-        let id = app.add_node_at(stub.clone(), egui::Pos2::ZERO).unwrap();
+        let id = app.add_node_at(kind.clone(), egui::Pos2::ZERO).unwrap();
 
         assert_eq!(app.z_order, [id]);
         assert_eq!(id.index(), 0);
         let node = app.node(id).unwrap();
-        assert_eq!(node.node.type_id(), STUB_NODE);
+        assert_eq!(node.node.type_id(), OSCILLOGRAPH);
         // The same size as the palette preview, which only has the spec.
-        assert_eq!(node.rect().size(), ui::node_size(stub.spec()));
+        assert_eq!(node.rect().size(), ui::node_size(kind.spec()));
     }
 
     #[test]

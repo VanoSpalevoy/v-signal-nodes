@@ -9,7 +9,7 @@
 use std::ffi::OsStr;
 use std::sync::Arc;
 
-use v_signal_nodes_core::{AppError, NodeSpec};
+use v_signal_nodes_core::{Error, NodeSpec};
 use v_signal_nodes_plugin_api::ffi::{
     self, EntryFn, FfiParamValue, FfiPlugin, FfiProcessArgs, FfiProcessor, FfiSlice, VersionFn,
 };
@@ -53,9 +53,12 @@ impl DynamicPlugin {
     /// Loading a library runs its initialization code, and the plugin's code then
     /// runs in this process: the library must be a trusted plugin built with
     /// `export_plugin!`.
-    pub unsafe fn open(path: impl AsRef<OsStr>) -> Result<Self, AppError> {
+    pub unsafe fn open(path: impl AsRef<OsStr>) -> Result<Self, Error> {
         let path = path.as_ref();
-        let error = |message: String| AppError::Plugin(format!("{}: {message}", path.display()));
+        let error = |reason: String| Error::PluginLibrary {
+            path: path.display().to_string(),
+            reason,
+        };
         // SAFETY: forwarded to the caller.
         unsafe {
             let library = libloading::Library::new(path).map_err(|err| error(err.to_string()))?;
@@ -64,9 +67,11 @@ impl DynamicPlugin {
                 .map_err(|err| error(format!("not a plugin ({err})")))?;
             let version = version();
             if version != API_VERSION {
-                return Err(error(format!(
-                    "built for plugin API v{version}, host is v{API_VERSION}"
-                )));
+                return Err(Error::PluginApiMismatch {
+                    path: path.display().to_string(),
+                    found: version,
+                    expected: API_VERSION,
+                });
             }
             let entry = library
                 .get::<EntryFn>(ffi::ENTRY_SYMBOL)
@@ -85,9 +90,9 @@ impl DynamicPlugin {
     pub unsafe fn from_ffi(
         plugin: FfiPlugin,
         library: Option<libloading::Library>,
-    ) -> Result<Self, AppError> {
+    ) -> Result<Self, Error> {
         if plugin.ctx.is_null() {
-            return Err(AppError::Plugin("plugin failed to initialize".into()));
+            return Err(Error::Plugin("plugin failed to initialize".into()));
         }
         let loaded = Arc::new(Loaded {
             plugin,

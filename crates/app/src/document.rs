@@ -26,11 +26,13 @@
 #![allow(dead_code, reason = "no Save/Open commands in the UI yet")]
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use v_signal_nodes_core::{AppError, ParamValue};
+use v_signal_nodes_core::{Error, GraphError, ParamValue};
 
 /// Version of the file format written by this build. Bump it on any incompatible
 /// change and migrate older versions in [`Document::from_json`].
@@ -40,6 +42,85 @@ pub(crate) const FORMAT_VERSION: u32 = 1;
 /// real layout, but small enough for the canvas math in `f32` (grid, routing) to
 /// stay exact to well under a canvas unit.
 const MAX_COORDINATE: f32 = 1_000_000.0;
+
+/// Why a document can't be read or opened.
+#[derive(Debug)]
+pub(crate) enum DocumentError {
+    /// Reading or writing the file failed.
+    Io(io::Error),
+    /// The text isn't a document (bad JSON, unknown fields, missing ones).
+    Malformed(serde_json::Error),
+    /// Written by a build with another [`FORMAT_VERSION`].
+    UnsupportedVersion(u32),
+    /// A node's position or parameter isn't finite.
+    NonFiniteNumber { node: usize },
+    /// A node lies beyond [`MAX_COORDINATE`].
+    TooFarAway { node: usize },
+    /// The document needs plugins that aren't loaded.
+    MissingPlugins(Vec<String>),
+    /// More nodes than the editor allows.
+    TooManyNodes { count: usize, limit: usize },
+    /// Two nodes have the same ID.
+    RepeatedNode(usize),
+    /// A node's type or parameters don't fit what the plugins provide.
+    Node { node: usize, error: Error },
+    /// A connection refers to a node ID the document doesn't have.
+    ConnectionToMissingNode(DocConnection),
+    /// Two connections feed one input.
+    InputFedTwice(DocConnection),
+    /// A connection breaks a graph rule.
+    Connection {
+        connection: DocConnection,
+        error: GraphError,
+    },
+}
+
+impl fmt::Display for DocumentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "I/O error: {err}"),
+            Self::Malformed(err) => write!(f, "not a valid document: {err}"),
+            Self::UnsupportedVersion(version) => write!(
+                f,
+                "unsupported document version {version} (expected {FORMAT_VERSION})"
+            ),
+            Self::NonFiniteNumber { node } => write!(f, "node {node} has a non-finite number"),
+            Self::TooFarAway { node } => {
+                write!(
+                    f,
+                    "node {node} is placed beyond {MAX_COORDINATE} canvas units"
+                )
+            }
+            Self::MissingPlugins(names) => write!(
+                f,
+                "the document needs plugins that aren't loaded: {}",
+                names.join(", ")
+            ),
+            Self::TooManyNodes { count, limit } => {
+                write!(f, "the document has {count} nodes, more than {limit}")
+            }
+            Self::RepeatedNode(node) => write!(f, "node ID {node} is repeated"),
+            Self::Node { node, error } => write!(f, "node {node}: {error}"),
+            Self::ConnectionToMissingNode(connection) => {
+                write!(f, "connection {connection:?} refers to a missing node")
+            }
+            Self::InputFedTwice(connection) => {
+                write!(f, "connection {connection:?} feeds an input twice")
+            }
+            Self::Connection { connection, error } => {
+                write!(f, "connection {connection:?}: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DocumentError {}
+
+impl From<io::Error> for DocumentError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
+}
 
 /// A saved node graph.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -116,14 +197,10 @@ impl Document {
     /// unsupported format versions, non-finite positions or numbers and positions
     /// beyond [`MAX_COORDINATE`]. Plugins and graph rules (known types, sockets,
     /// cycles) are checked by the editor.
-    pub(crate) fn from_json(json: &str) -> Result<Self, AppError> {
-        let document: Self = serde_json::from_str(json)
-            .map_err(|err| AppError::InvalidInput(format!("not a valid document: {err}")))?;
+    pub(crate) fn from_json(json: &str) -> Result<Self, DocumentError> {
+        let document: Self = serde_json::from_str(json).map_err(DocumentError::Malformed)?;
         if document.version != FORMAT_VERSION {
-            return Err(AppError::InvalidInput(format!(
-                "unsupported document version {} (expected {FORMAT_VERSION})",
-                document.version
-            )));
+            return Err(DocumentError::UnsupportedVersion(document.version));
         }
         for node in &document.nodes {
             let numbers = node.params.values().filter_map(|value| match value {
@@ -131,20 +208,14 @@ impl Document {
                 _ => None,
             });
             if !node.pos.into_iter().chain(numbers).all(f32::is_finite) {
-                return Err(AppError::InvalidInput(format!(
-                    "node {} has a non-finite number",
-                    node.id
-                )));
+                return Err(DocumentError::NonFiniteNumber { node: node.id });
             }
             if node
                 .pos
                 .iter()
                 .any(|coordinate| coordinate.abs() > MAX_COORDINATE)
             {
-                return Err(AppError::InvalidInput(format!(
-                    "node {} is placed beyond {MAX_COORDINATE} canvas units",
-                    node.id
-                )));
+                return Err(DocumentError::TooFarAway { node: node.id });
             }
         }
         Ok(document)
@@ -156,7 +227,10 @@ impl Document {
 /// (`path` + `.tmp`, so `song.json` → `song.json.tmp`, never touching an
 /// unrelated `song.tmp`) and renames it over `path`, so a failed save leaves the
 /// old file intact.
-pub(crate) fn save_document(document: &Document, path: impl AsRef<Path>) -> Result<(), AppError> {
+pub(crate) fn save_document(
+    document: &Document,
+    path: impl AsRef<Path>,
+) -> Result<(), DocumentError> {
     let path = path.as_ref();
     let mut temp = path.as_os_str().to_owned();
     temp.push(".tmp");
@@ -169,7 +243,7 @@ pub(crate) fn save_document(document: &Document, path: impl AsRef<Path>) -> Resu
 }
 
 /// Reads a document from `path` (see [`Document::from_json`]).
-pub(crate) fn load_document(path: impl AsRef<Path>) -> Result<Document, AppError> {
+pub(crate) fn load_document(path: impl AsRef<Path>) -> Result<Document, DocumentError> {
     Document::from_json(&fs::read_to_string(path)?)
 }
 
@@ -251,30 +325,36 @@ mod tests {
 
     #[test]
     fn rejects_malformed_documents() {
-        let refused = |json: &str| {
+        let malformed = |json: &str| {
             assert!(
-                matches!(Document::from_json(json), Err(AppError::InvalidInput(_))),
+                matches!(Document::from_json(json), Err(DocumentError::Malformed(_))),
                 "accepted {json}"
             );
         };
-        refused("");
-        refused("[]");
-        refused(r#"{ "version": 1, "nodes": [] }"#);
-        refused(r#"{ "version": 2, "nodes": [], "connections": [] }"#);
-        refused(r#"{ "version": 1, "nodes": [], "connections": [], "extra": 0 }"#);
-        refused(
+        malformed("");
+        malformed("[]");
+        malformed(r#"{ "version": 1, "nodes": [] }"#);
+        malformed(r#"{ "version": 1, "nodes": [], "connections": [], "extra": 0 }"#);
+        malformed(
             r#"{ "version": 1, "connections": [],
                  "nodes": [{ "id": 0, "type_id": "std.gain", "pos": [null, 0] }] }"#,
         );
-        refused(
+        malformed(
             r#"{ "version": 1, "connections": [],
                  "nodes": [{ "id": 0, "type_id": "std.gain", "pos": [0, 0],
                              "params": { "gain": { "percent": 5 } } }] }"#,
         );
-        refused(
-            r#"{ "version": 1, "connections": [],
-                 "nodes": [{ "id": 0, "type_id": "std.gain", "pos": [0, -1e9] }] }"#,
-        );
+        assert!(matches!(
+            Document::from_json(r#"{ "version": 2, "nodes": [], "connections": [] }"#),
+            Err(DocumentError::UnsupportedVersion(2))
+        ));
+        assert!(matches!(
+            Document::from_json(
+                r#"{ "version": 1, "connections": [],
+                     "nodes": [{ "id": 0, "type_id": "std.gain", "pos": [0, -1e9] }] }"#,
+            ),
+            Err(DocumentError::TooFarAway { node: 0 })
+        ));
     }
 
     #[test]
@@ -293,7 +373,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep me");
         assert!(matches!(
             load_document(dir.join("missing.json")),
-            Err(AppError::Io(_))
+            Err(DocumentError::Io(_))
         ));
 
         fs::remove_dir_all(&dir).unwrap();

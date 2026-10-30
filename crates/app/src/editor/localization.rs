@@ -34,6 +34,13 @@ pub(super) enum Text {
     NodeLimitReached,
     ConnectionCreatesCycle,
     ConnectionIncompatible,
+    // Running the graph (see `execution`).
+    NoOutputNode,
+    GraphCantRun,
+    RunningRealtime,
+    RunningOnePass,
+    OnePassResult,
+    RunFailed,
     SnapToGrid,
     Scale,
     // Menu bar titles and commands (see `commands`).
@@ -102,6 +109,12 @@ impl Language {
             (Self::English, Text::ConnectionIncompatible) => {
                 "Connection refused: the sockets don't fit (rate or channels)"
             }
+            (Self::English, Text::NoOutputNode) => "Nothing to run: no output node",
+            (Self::English, Text::GraphCantRun) => "The graph can't run",
+            (Self::English, Text::RunningRealtime) => "Running in real time",
+            (Self::English, Text::RunningOnePass) => "Running once…",
+            (Self::English, Text::OnePassResult) => "Run once: frames / time / peak",
+            (Self::English, Text::RunFailed) => "Run failed",
             (Self::English, Text::SnapToGrid) => "Snap to grid",
             (Self::English, Text::Scale) => "Scale",
             (Self::English, Text::MenuEdit) => "Edit",
@@ -133,6 +146,12 @@ impl Language {
             (Self::Russian, Text::ConnectionIncompatible) => {
                 "Соединение отклонено: сокеты несовместимы (частота или каналы)"
             }
+            (Self::Russian, Text::NoOutputNode) => "Нечего запускать: нет выходной ноды",
+            (Self::Russian, Text::GraphCantRun) => "Граф нельзя запустить",
+            (Self::Russian, Text::RunningRealtime) => "Работает в реальном времени",
+            (Self::Russian, Text::RunningOnePass) => "Однократный запуск…",
+            (Self::Russian, Text::OnePassResult) => "Однократный запуск: отсчёты / время / пик",
+            (Self::Russian, Text::RunFailed) => "Ошибка запуска",
             (Self::Russian, Text::SnapToGrid) => "Привязать к сетке",
             (Self::Russian, Text::Scale) => "Масштаб",
             (Self::Russian, Text::MenuEdit) => "Правка",

@@ -16,7 +16,7 @@
 //! assert_eq!(GAIN.read(ParamValue::Toggle(true)), None);
 //! ```
 
-use crate::AppError;
+use crate::ParamProblem;
 use crate::model::TextKey;
 
 /// What values a parameter takes, with its default.
@@ -239,31 +239,25 @@ impl ParamSpec {
 
     /// Checks the id and name aren't empty, a number range is finite and
     /// ordered, a choice has options, and the default is accepted.
-    pub fn validate(&self) -> Result<(), AppError> {
-        let invalid = |message: &str| {
-            Err(AppError::InvalidInput(format!(
-                "parameter '{}': {message}",
-                self.id
-            )))
-        };
+    pub fn validate(&self) -> Result<(), ParamProblem> {
         if self.id.trim().is_empty() {
-            return invalid("empty id");
+            return Err(ParamProblem::EmptyId);
         }
         if self.name.trim().is_empty() {
-            return invalid("empty name");
+            return Err(ParamProblem::EmptyName);
         }
         if let ParamKind::Number { min, max, .. } = self.kind
             && !(min.is_finite() && max.is_finite() && min <= max)
         {
-            return invalid("range must be finite with min <= max");
+            return Err(ParamProblem::BadRange);
         }
         if let ParamKind::Choice { options, .. } = &self.kind
             && options.is_empty()
         {
-            return invalid("no options");
+            return Err(ParamProblem::NoOptions);
         }
         if !self.accepts(self.default_value()) {
-            return invalid("default out of range");
+            return Err(ParamProblem::DefaultOutOfRange);
         }
         Ok(())
     }
@@ -309,15 +303,30 @@ mod tests {
 
     #[test]
     fn rejects_invalid_params() {
-        for param in [
-            ParamSpec::number("x", "X", 1.0, 0.0, 0.5),
-            ParamSpec::number("x", "X", 0.0, f32::INFINITY, 0.5),
-            ParamSpec::number("x", "X", 0.0, 1.0, 2.0),
-            ParamSpec::choice("x", "X", Vec::<String>::new(), 0),
-            ParamSpec::choice("x", "X", ["a"], 1),
-            ParamSpec::toggle("", "X", false),
+        for (param, problem) in [
+            (
+                ParamSpec::number("x", "X", 1.0, 0.0, 0.5),
+                ParamProblem::BadRange,
+            ),
+            (
+                ParamSpec::number("x", "X", 0.0, f32::INFINITY, 0.5),
+                ParamProblem::BadRange,
+            ),
+            (
+                ParamSpec::number("x", "X", 0.0, 1.0, 2.0),
+                ParamProblem::DefaultOutOfRange,
+            ),
+            (
+                ParamSpec::choice("x", "X", Vec::<String>::new(), 0),
+                ParamProblem::NoOptions,
+            ),
+            (
+                ParamSpec::choice("x", "X", ["a"], 1),
+                ParamProblem::DefaultOutOfRange,
+            ),
+            (ParamSpec::toggle("", "X", false), ParamProblem::EmptyId),
         ] {
-            assert!(param.validate().is_err(), "{param:?}");
+            assert_eq!(param.validate(), Err(problem), "{param:?}");
         }
     }
 }

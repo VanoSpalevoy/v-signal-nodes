@@ -2,8 +2,10 @@
 //!
 //! [`PluginHost::load`] collects a plugin's [`NodeProvider`]s, registers their
 //! specs in a [`NodeFactory`] and keeps the providers by type id.
-//! [`PluginHost::build_node`] then returns the [`Node`] together with its
-//! [`NodeProcessor`].
+//! [`PluginHost::build_node`] then returns a [`Node`] for the graph, and
+//! [`PluginHost::create_processor`] a [`NodeProcessor`] for running it: separately,
+//! because nodes are edited long before anything runs, and only the nodes of a
+//! compiled plan need a processor.
 //!
 //! [`PluginHost::plugins`] lists the loaded plugins with their versions
 //! ([`LoadedPlugin`]).
@@ -13,20 +15,15 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use v_signal_nodes_core::{AppError, Node, NodeFactory, NodeSpec};
+use v_signal_nodes_core::{Error, Node, NodeFactory, NodeSpec};
 use v_signal_nodes_plugin_api::{NodeProcessor, NodeProvider, Plugin, Registrar};
 
 mod dynamic;
 
 pub use dynamic::DynamicPlugin;
-
-/// A node built from a plugin: the graph-side description plus its DSP state.
-pub struct PluginNode {
-    pub node: Node,
-    pub processor: Box<dyn NodeProcessor>,
-}
 
 /// Registry of loaded plugins and their node types.
 #[derive(Default)]
@@ -76,12 +73,10 @@ impl PluginHost {
     /// There's no API version check here: a linked plugin is compiled against
     /// this host's `plugin-api`, and a library's version is checked when it's
     /// opened ([`DynamicPlugin::open`]).
-    pub fn load(&mut self, plugin: &dyn Plugin) -> Result<(), AppError> {
+    pub fn load(&mut self, plugin: &dyn Plugin) -> Result<(), Error> {
         let name = plugin.name();
         if self.plugin(name).is_some() {
-            return Err(AppError::InvalidInput(format!(
-                "plugin '{name}' is already loaded"
-            )));
+            return Err(Error::PluginAlreadyLoaded(name.to_owned()));
         }
 
         let mut collector = Collector::default();
@@ -122,7 +117,7 @@ impl PluginHost {
     /// # Safety
     ///
     /// Same as [`DynamicPlugin::open`]: the library must be a trusted plugin.
-    pub unsafe fn load_library(&mut self, path: impl AsRef<OsStr>) -> Result<(), AppError> {
+    pub unsafe fn load_library(&mut self, path: impl AsRef<OsStr>) -> Result<(), Error> {
         // SAFETY: forwarded to the caller.
         let plugin = unsafe { DynamicPlugin::open(path) }?;
         self.load(&plugin)
@@ -156,11 +151,20 @@ impl PluginHost {
         self.factory.spec(type_id)
     }
 
-    /// Builds a node of type `type_id` with a fresh processor.
-    pub fn build_node(&self, type_id: &str) -> Result<PluginNode, AppError> {
-        let node = self.factory.build_node(type_id)?;
-        let processor = self.providers[type_id].provider.create_processor();
-        Ok(PluginNode { node, processor })
+    /// Builds a node of type `type_id`, with every parameter at its default.
+    pub fn build_node(&self, type_id: &str) -> Result<Node, Error> {
+        self.factory.build_node(type_id)
+    }
+
+    /// Creates a fresh processor for a node of type `type_id`. A plugin panicking in
+    /// there is an error, like a panic in a dynamic library.
+    pub fn create_processor(&self, type_id: &str) -> Result<Box<dyn NodeProcessor>, Error> {
+        let provided = self
+            .providers
+            .get(type_id)
+            .ok_or_else(|| Error::UnknownNodeType(type_id.to_owned()))?;
+        catch_unwind(AssertUnwindSafe(|| provided.provider.create_processor()))
+            .map_err(|_| Error::Plugin(format!("{type_id} panicked creating its processor")))
     }
 }
 
@@ -284,14 +288,12 @@ mod tests {
         let mut host = PluginHost::new();
         host.load(&TestPlugin).unwrap();
 
-        let mut built = host.build_node("test.gain").unwrap();
+        let node = host.build_node("test.gain").unwrap();
+        let mut processor = host.create_processor("test.gain").unwrap();
 
-        assert_eq!(built.node.type_id(), "test.gain");
-        assert!(Arc::ptr_eq(
-            built.node.spec(),
-            host.spec("test.gain").unwrap()
-        ));
-        check_life_cycle(built.processor.as_mut());
+        assert_eq!(node.type_id(), "test.gain");
+        assert!(Arc::ptr_eq(node.spec(), host.spec("test.gain").unwrap()));
+        check_life_cycle(processor.as_mut());
         assert_eq!(host.plugins(), [test_plugin()]);
         assert_eq!(host.plugin("test"), Some(&test_plugin()));
         assert_eq!(host.plugin_of("test.gain"), Some(&test_plugin()));
@@ -307,9 +309,9 @@ mod tests {
         host.load(&plugin).unwrap();
         drop(plugin);
 
-        let mut built = host.build_node("test.gain").unwrap();
+        let mut processor = host.create_processor("test.gain").unwrap();
 
-        check_life_cycle(built.processor.as_mut());
+        check_life_cycle(processor.as_mut());
         assert_eq!(host.plugins(), [test_plugin()]);
     }
 
@@ -387,7 +389,56 @@ mod tests {
         let mut host = PluginHost::new();
         host.load(&TestPlugin).unwrap();
 
-        assert!(host.load(&TestPlugin).is_err());
-        assert!(host.build_node("test.missing").is_err());
+        assert!(matches!(
+            host.load(&TestPlugin),
+            Err(Error::PluginAlreadyLoaded(_))
+        ));
+        assert!(matches!(
+            host.build_node("test.missing"),
+            Err(Error::UnknownNodeType(_))
+        ));
+        assert!(matches!(
+            host.create_processor("test.missing"),
+            Err(Error::UnknownNodeType(_))
+        ));
+    }
+
+    #[test]
+    fn a_panic_creating_a_processor_is_an_error() {
+        struct Panics;
+
+        impl NodeProvider for Panics {
+            fn spec(&self) -> NodeSpec {
+                Gain.spec()
+            }
+
+            fn create_processor(&self) -> Box<dyn NodeProcessor> {
+                panic!("test panic in create_processor");
+            }
+        }
+
+        struct PanicsPlugin;
+
+        impl Plugin for PanicsPlugin {
+            fn name(&self) -> &str {
+                "panics"
+            }
+
+            fn version(&self) -> &str {
+                "0.1.0"
+            }
+
+            fn register(&self, registrar: &mut dyn Registrar) {
+                registrar.register_node(Box::new(Panics));
+            }
+        }
+
+        let mut host = PluginHost::new();
+        host.load(&PanicsPlugin).unwrap();
+
+        assert!(matches!(
+            host.create_processor("test.gain"),
+            Err(Error::Plugin(_))
+        ));
     }
 }

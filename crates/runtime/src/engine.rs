@@ -49,6 +49,9 @@ pub struct Engine {
     /// Processors to take from the previous engine in [`adopt`](Self::adopt), as
     /// `(step there, step here)`.
     carried: Vec<(usize, usize)>,
+    /// Frames processed so far, the time of the run: nodes get it through
+    /// [`ProcessIo::position`], and the engine replacing this one goes on from it.
+    position: u64,
 }
 
 // SAFETY: the only non-`Send` fields are the `RawBuffer` scratch vectors. Their
@@ -167,13 +170,16 @@ impl Engine {
             inputs: Vec::with_capacity(max_inputs),
             outputs: Vec::with_capacity(max_outputs),
             carried,
+            position: 0,
         })
     }
 
     /// Takes the processors [`successor`](Self::successor) left out from `previous`,
-    /// the engine this one replaces. Allocates nothing, frees nothing and can't
-    /// panic, so it's safe on the real-time thread. `previous` must not run again.
+    /// the engine this one replaces, and goes on from its position in time, so new
+    /// nodes share one time with those that stay. Allocates nothing, frees nothing and
+    /// can't panic, so it's safe on the real-time thread. `previous` must not run again.
     pub fn adopt(&mut self, previous: &mut Engine) {
+        self.position = previous.position;
         for &(old, new) in &self.carried {
             if let (Some(from), Some(to)) = (
                 previous.processors.get_mut(old),
@@ -208,7 +214,12 @@ impl Engine {
     /// Stops at the first failing processor.
     pub fn process(&mut self, frames: usize) -> Result<(), RuntimeError> {
         self.check_frames(frames)?;
-        let memory = Memory::of(&mut self.pool, &self.offsets, &mut self.silence);
+        let memory = Memory::of(
+            &mut self.pool,
+            &self.offsets,
+            &mut self.silence,
+            self.position,
+        );
         let buffers = self.plan.buffers();
         for (step, processor) in self.plan.steps().iter().zip(&mut self.processors) {
             // SAFETY: steps run one at a time, in an order that follows `after`.
@@ -224,6 +235,7 @@ impl Engine {
                 )?;
             }
         }
+        self.position += frames as u64;
         Ok(())
     }
 
@@ -296,7 +308,12 @@ impl Engine {
         let (most_inputs, most_outputs) = (self.inputs.capacity(), self.outputs.capacity());
         let shared = Shared {
             processors: self.processors.as_mut_ptr(),
-            memory: Memory::of(&mut self.pool, &self.offsets, &mut self.silence),
+            memory: Memory::of(
+                &mut self.pool,
+                &self.offsets,
+                &mut self.silence,
+                self.position,
+            ),
         };
         let buffers = self.plan.buffers();
         let work = || {
@@ -354,6 +371,7 @@ impl Engine {
         let schedule = schedule
             .into_inner()
             .expect("no panic while holding the lock");
+        self.position += frames as u64;
         schedule.error.map_or(Ok(()), Err)
     }
 
@@ -405,9 +423,10 @@ impl Engine {
         true
     }
 
-    /// Forgets the signal history of every processor (playback jumped). A panicking
-    /// `reset` is caught and leaves that processor as it is.
+    /// Forgets the signal history of every processor (playback jumped) and starts the
+    /// time over. A panicking `reset` is caught and leaves that processor as it is.
     pub fn reset(&mut self) {
+        self.position = 0;
         for processor in &mut self.processors {
             let _ = catch_unwind(AssertUnwindSafe(|| processor.reset()));
         }
@@ -436,14 +455,22 @@ struct Memory<'a> {
     pool: *mut f32,
     offsets: &'a [usize],
     silence: *mut f32,
+    /// Frames before this block.
+    position: u64,
 }
 
 impl<'a> Memory<'a> {
-    fn of(pool: &'a mut [f32], offsets: &'a [usize], silence: &'a mut [f32]) -> Self {
+    fn of(
+        pool: &'a mut [f32],
+        offsets: &'a [usize],
+        silence: &'a mut [f32],
+        position: u64,
+    ) -> Self {
         Self {
             pool: pool.as_mut_ptr(),
             offsets,
             silence: silence.as_mut_ptr(),
+            position,
         }
     }
 
@@ -540,7 +567,8 @@ unsafe fn run_step(
     // initialized. A step's outputs are distinct from each other, from `silence`
     // and from its inputs: the plan frees a buffer only after its last reader has
     // run, so a buffer read here can't be handed to this step's outputs.
-    let mut io = unsafe { ProcessIo::from_raw(frames, &step.spec, &step.params, inputs, outputs) };
+    let mut io = unsafe { ProcessIo::from_raw(frames, &step.spec, &step.params, inputs, outputs) }
+        .with_position(memory.position);
     match catch_unwind(AssertUnwindSafe(|| processor.process(&mut io))) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(RuntimeError::Plugin {
@@ -590,10 +618,52 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
     use v_signal_nodes_core::{Graph, InputRef, Node, NodeKind, NodeSocket, NodeSpec, compile};
+    use v_signal_nodes_plugin_api::{NodeProvider, Plugin, Registrar};
     use v_signal_nodes_plugin_host::PluginHost;
-    use v_signal_nodes_plugin_std::{GAIN, SINK, SOURCE, StdPlugin};
+    use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE, StdPlugin};
 
     const FRAMES: usize = 64;
+    /// Type id of [`StereoSink`].
+    const STEREO_SINK: &str = "test.stereo_sink";
+
+    /// An output node with a stereo input, which every mono signal is converted for:
+    /// the standard nodes are all mono.
+    struct StereoSink;
+
+    impl NodeProvider for StereoSink {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec::new(STEREO_SINK, "Stereo sink", NodeKind::Output)
+                .input(NodeSocket::signal_in("in").with_channels(2))
+        }
+
+        fn create_processor(&self) -> Box<dyn NodeProcessor> {
+            Box::new(StereoSinkProcessor)
+        }
+    }
+
+    struct StereoSinkProcessor;
+
+    impl NodeProcessor for StereoSinkProcessor {
+        fn process(&mut self, _io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    struct StereoSinkPlugin;
+
+    impl Plugin for StereoSinkPlugin {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn version(&self) -> &str {
+            "0.1.0"
+        }
+
+        fn register(&self, registrar: &mut dyn Registrar) {
+            registrar.register_node(Box::new(StereoSink));
+        }
+    }
 
     /// A graph being built together with the processors of its nodes.
     struct Builder {
@@ -606,6 +676,7 @@ mod tests {
         fn new() -> Self {
             let mut host = PluginHost::new();
             host.load(&StdPlugin).unwrap();
+            host.load(&StereoSinkPlugin).unwrap();
             Self {
                 host,
                 graph: Graph::new(),
@@ -680,7 +751,7 @@ mod tests {
     fn output_nodes_get_their_signal_converted() {
         let mut builder = Builder::new();
         let source = builder.add(SOURCE);
-        let sink = builder.add(SINK);
+        let sink = builder.add(STEREO_SINK);
         builder.connect(source, sink);
         let mut engine = builder.engine();
 
@@ -698,6 +769,89 @@ mod tests {
         );
     }
 
+    /// Two generators with the phases `first` and `second` (degrees), a summing
+    /// amplifier and something to keep its output readable; the amplifier's id.
+    fn sum_of_two(first: f32, second: f32) -> (Builder, NodeId) {
+        let mut builder = Builder::new();
+        let sum = builder.add(MIXER);
+        for (input, phase) in [first, second].into_iter().enumerate() {
+            let source = builder.add(SOURCE);
+            let node = builder.graph.node_mut(source).unwrap();
+            node.set_param("phase", ParamValue::Number(phase)).unwrap();
+            builder
+                .graph
+                .connect(OutputRef::new(source, 0), InputRef::new(sum, input))
+                .unwrap();
+        }
+        let sink = builder.add(SINK);
+        builder.connect(sum, sink);
+        (builder, sum)
+    }
+
+    #[test]
+    fn generators_in_antiphase_add_up_to_nothing() {
+        let (builder, sum) = sum_of_two(0.0, 180.0);
+        let mut engine = builder.engine();
+
+        for _ in 0..200 {
+            engine.process(FRAMES).unwrap();
+            let output = engine.output(OutputRef::new(sum, 0), FRAMES).unwrap();
+            let peak = output.iter().fold(0.0_f32, |peak, s| peak.max(s.abs()));
+            assert!(peak < 1e-6, "{peak}");
+        }
+    }
+
+    #[test]
+    fn generators_in_phase_add_up_to_twice_as_much() {
+        let (builder, sum) = sum_of_two(0.0, 0.0);
+        let mut engine = builder.engine();
+
+        let mut peak = 0.0_f32;
+        for _ in 0..50 {
+            engine.process(FRAMES).unwrap();
+            let output = engine.output(OutputRef::new(sum, 0), FRAMES).unwrap();
+            peak = output.iter().fold(peak, |peak, s| peak.max(s.abs()));
+        }
+        assert!((peak - 2.0).abs() < 0.01, "{peak}");
+    }
+
+    #[test]
+    fn a_generator_added_during_a_run_shares_the_time_of_the_others() {
+        let mut builder = Builder::new();
+        let early = builder.add(SOURCE);
+        let sink = builder.add(SINK);
+        builder.connect(early, sink);
+        let first_plan = compile(&builder.graph).unwrap();
+        let previous: Vec<_> = first_plan.steps().iter().map(|step| step.node).collect();
+        let host = std::mem::replace(&mut builder.host, PluginHost::new());
+        let processors = std::mem::take(&mut builder.processors);
+        let mut first = Engine::new(first_plan, processors, 48_000.0, FRAMES).unwrap();
+        // Not a whole number of periods, so a restarted phase would show.
+        for _ in 0..3 {
+            first.process(FRAMES).unwrap();
+        }
+
+        let late = builder.graph.add(host.build_node(SOURCE).unwrap());
+        let other_sink = builder.graph.add(host.build_node(SINK).unwrap());
+        builder
+            .graph
+            .connect(OutputRef::new(late, 0), InputRef::new(other_sink, 0))
+            .unwrap();
+        let plan = compile(&builder.graph).unwrap();
+        let fresh = processors_for(&plan, &previous, |step| {
+            host.create_processor(&step.spec.type_id)
+        })
+        .unwrap();
+        let mut second = Engine::successor(plan, &previous, fresh, 48_000.0, FRAMES).unwrap();
+        second.adopt(&mut first);
+        second.process(FRAMES).unwrap();
+
+        assert_eq!(
+            second.output(OutputRef::new(late, 0), FRAMES),
+            second.output(OutputRef::new(early, 0), FRAMES),
+        );
+    }
+
     #[test]
     fn an_unconnected_output_node_gets_silence() {
         let mut builder = Builder::new();
@@ -708,7 +862,7 @@ mod tests {
 
         let output = engine.plan().outputs()[0];
         let delivered = engine.delivered(&output, FRAMES);
-        assert_eq!(delivered, vec![0.0; FRAMES * 2]);
+        assert_eq!(delivered, vec![0.0; FRAMES]);
     }
 
     #[test]

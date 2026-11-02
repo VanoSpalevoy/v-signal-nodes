@@ -25,7 +25,9 @@
 //! | [`debug`]   | bottom          | status line and the list of connections            |
 //! | [`palette`] | left            | node kinds to drag onto the canvas                 |
 //! | [`canvas`]  | central         | nodes and connections: drag, connect, delete       |
-//! | [`params`]  | windows         | parameter controls, advanced parameters windows    |
+//! | [`windows`] | windows         | node windows, floating or separate system windows  |
+//! | [`params`]  | windows         | parameter controls, advanced parameters window     |
+//! | [`plot`]    | windows         | contents of a plot window                          |
 //! | [`node`]    | —               | node model and geometry ([`NodeWidget`], sockets)  |
 //! | [`placement`] | —             | keeping nodes from overlapping                     |
 //! | [`routing`] | —               | routing connections around nodes                   |
@@ -52,8 +54,10 @@ mod node;
 mod palette;
 mod params;
 mod placement;
+mod plot;
 mod routing;
 mod toolbar;
+mod windows;
 
 use eframe::egui;
 use v_signal_nodes_core::NodeSpec;
@@ -62,8 +66,9 @@ use super::VSignalNodesApp;
 pub(super) use canvas::RouteCache;
 #[cfg(test)]
 pub(super) use node::std_kind;
-pub(super) use node::{NodeKind, NodeWidget, SocketRef, node_size};
+pub(super) use node::{NodeKind, NodeWidget, NodeWindow, SocketRef, node_size};
 pub(super) use placement::{place_new_node, settle, snap};
+pub(super) use windows::ClosedWindows;
 
 /// Darkest background: text edits, slider rails and other "extreme" backgrounds.
 const WINDOW_BG: egui::Color32 = egui::Color32::from_rgb(6, 7, 9);
@@ -100,7 +105,7 @@ pub(super) fn render(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
     debug::show(app, ui);
     palette::show(app, ui);
     canvas::show(app, ui);
-    params::show_advanced_windows(app, ui);
+    windows::show(app, ui);
 }
 
 /// Frame shared by the side panels: `fill` background and padding, no outline.
@@ -185,7 +190,8 @@ fn visuals() -> egui::Visuals {
 /// tint and socket dots, and the drop preview, so a kind is recognizable everywhere.
 ///
 /// The spec's own [`NodeSpec::color`] if it sets one, else decided by the node's
-/// role (`core::NodeKind`): generators green, processors violet, outputs orange.
+/// role (`core::NodeKind`): generators green, processors violet, outputs orange,
+/// instruments cyan.
 fn node_color(spec: &NodeSpec) -> egui::Color32 {
     use v_signal_nodes_core::NodeKind as Role;
     if let Some(color) = spec.color {
@@ -195,5 +201,6 @@ fn node_color(spec: &NodeSpec) -> egui::Color32 {
         Role::Generator => egui::Color32::from_rgb(82, 196, 126),
         Role::Processor => egui::Color32::from_rgb(152, 124, 250),
         Role::Output => egui::Color32::from_rgb(236, 128, 92),
+        Role::Instrument => egui::Color32::from_rgb(84, 192, 214),
     }
 }

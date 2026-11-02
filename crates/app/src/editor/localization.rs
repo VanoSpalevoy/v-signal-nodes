@@ -32,6 +32,8 @@ pub(super) enum Text {
     Output,
     DeleteNode,
     AdvancedParams,
+    WindowPreview,
+    WindowSeparate,
     NodeLimitReached,
     ConnectionCreatesCycle,
     ConnectionIncompatible,
@@ -59,6 +61,18 @@ pub(super) enum Text {
     // Toggle parameter values, the same for every plugin.
     On,
     Off,
+    // Plot windows (see `ui::plot`).
+    PlotNoData,
+    PlotMin,
+    PlotMax,
+    PlotPeakToPeak,
+    UnitSeconds,
+    UnitVolts,
+    PrefixNano,
+    PrefixMicro,
+    PrefixMilli,
+    PrefixKilo,
+    PrefixMega,
 }
 
 impl From<SocketDirection> for Text {
@@ -105,6 +119,8 @@ impl Language {
             (Self::English, Text::Output) => "Output",
             (Self::English, Text::DeleteNode) => "Delete node",
             (Self::English, Text::AdvancedParams) => "Advanced parameters",
+            (Self::English, Text::WindowPreview) => "preview",
+            (Self::English, Text::WindowSeparate) => "separate window",
             (Self::English, Text::NodeLimitReached) => "Node limit reached",
             (Self::English, Text::ConnectionCreatesCycle) => {
                 "Connection refused: it would create a cycle"
@@ -112,7 +128,7 @@ impl Language {
             (Self::English, Text::ConnectionIncompatible) => {
                 "Connection refused: the sockets don't fit (rate or channels)"
             }
-            (Self::English, Text::NoOutputNode) => "Nothing to run: no output node",
+            (Self::English, Text::NoOutputNode) => "Nothing to run: no output or instrument node",
             (Self::English, Text::GraphCantRun) => "The graph can't run",
             (Self::English, Text::RunningRealtime) => "Running in real time",
             (Self::English, Text::RunningOnePass) => "Running once…",
@@ -133,6 +149,17 @@ impl Language {
             (Self::English, Text::RunAsync) => "Run once (async)",
             (Self::English, Text::On) => "on",
             (Self::English, Text::Off) => "off",
+            (Self::English, Text::PlotNoData) => "No data: run the graph",
+            (Self::English, Text::PlotMin) => "min",
+            (Self::English, Text::PlotMax) => "max",
+            (Self::English, Text::PlotPeakToPeak) => "p-p",
+            (Self::English, Text::UnitSeconds) => "s",
+            (Self::English, Text::UnitVolts) => "V",
+            (Self::English, Text::PrefixNano) => "n",
+            (Self::English, Text::PrefixMicro) => "µ",
+            (Self::English, Text::PrefixMilli) => "m",
+            (Self::English, Text::PrefixKilo) => "k",
+            (Self::English, Text::PrefixMega) => "M",
             (Self::Russian, Text::Language) => "Язык",
             (Self::Russian, Text::Tools) => "Инструменты",
             (Self::Russian, Text::Settings) => "Настройки",
@@ -144,6 +171,8 @@ impl Language {
             (Self::Russian, Text::Output) => "Выход",
             (Self::Russian, Text::DeleteNode) => "Удалить ноду",
             (Self::Russian, Text::AdvancedParams) => "Расширенные параметры",
+            (Self::Russian, Text::WindowPreview) => "предпросмотр",
+            (Self::Russian, Text::WindowSeparate) => "отдельное окно",
             (Self::Russian, Text::NodeLimitReached) => "Достигнут лимит нод",
             (Self::Russian, Text::ConnectionCreatesCycle) => {
                 "Соединение отклонено: образуется цикл"
@@ -151,7 +180,7 @@ impl Language {
             (Self::Russian, Text::ConnectionIncompatible) => {
                 "Соединение отклонено: сокеты несовместимы (частота или каналы)"
             }
-            (Self::Russian, Text::NoOutputNode) => "Нечего запускать: нет выходной ноды",
+            (Self::Russian, Text::NoOutputNode) => "Нечего запускать: нет выхода или прибора",
             (Self::Russian, Text::GraphCantRun) => "Граф нельзя запустить",
             (Self::Russian, Text::RunningRealtime) => "Работает в реальном времени",
             (Self::Russian, Text::RunningOnePass) => "Однократный запуск…",
@@ -172,6 +201,17 @@ impl Language {
             (Self::Russian, Text::RunAsync) => "Однократный запуск (асинхронно)",
             (Self::Russian, Text::On) => "вкл",
             (Self::Russian, Text::Off) => "выкл",
+            (Self::Russian, Text::PlotNoData) => "Нет данных: запустите граф",
+            (Self::Russian, Text::PlotMin) => "мин",
+            (Self::Russian, Text::PlotMax) => "макс",
+            (Self::Russian, Text::PlotPeakToPeak) => "размах",
+            (Self::Russian, Text::UnitSeconds) => "с",
+            (Self::Russian, Text::UnitVolts) => "В",
+            (Self::Russian, Text::PrefixNano) => "н",
+            (Self::Russian, Text::PrefixMicro) => "мк",
+            (Self::Russian, Text::PrefixMilli) => "м",
+            (Self::Russian, Text::PrefixKilo) => "к",
+            (Self::Russian, Text::PrefixMega) => "М",
         }
     }
 }

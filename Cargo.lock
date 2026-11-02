@@ -3564,7 +3564,6 @@ dependencies = [
  "v-signal-nodes-device",
  "v-signal-nodes-plugin-host",
  "v-signal-nodes-plugin-std",
- "v-signal-nodes-plugin-stub-oscillograph",
  "v-signal-nodes-runtime",
 ]
 
@@ -3604,14 +3603,6 @@ dependencies = [
 name = "v-signal-nodes-plugin-std"
 version = "0.0.1"
 dependencies = [
- "v-signal-nodes-plugin-api",
-]
-
-[[package]]
-name = "v-signal-nodes-plugin-stub-oscillograph"
-version = "0.0.1"
-dependencies = [
- "rtrb",
  "v-signal-nodes-plugin-api",
 ]
 

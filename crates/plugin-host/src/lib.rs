@@ -172,7 +172,7 @@ impl PluginHost {
 mod tests {
     use super::*;
     use v_signal_nodes_core::{NodeKind, NodeSocket, NumberParam, ParamValue};
-    use v_signal_nodes_plugin_api::{PluginError, ProcessIo, RawBuffer, ffi};
+    use v_signal_nodes_plugin_api::{PluginError, ProcessIo, RawBuffer, RawPlotSink, ffi};
 
     const GAIN: NumberParam = NumberParam("gain");
 
@@ -250,7 +250,7 @@ mod tests {
         let mut output = vec![0.0; input.len()];
         let inputs = [RawBuffer::input(input)];
         let outputs = [RawBuffer::output(&mut output)];
-        // SAFETY: the spec has one mono audio input and output, both buffers are
+        // SAFETY: the spec has one mono input and output, both buffers are
         // `input.len()` long, live for the call and don't overlap.
         let mut io = unsafe { ProcessIo::from_raw(input.len(), &spec, params, &inputs, &outputs) };
         processor.process(&mut io)?;
@@ -335,6 +335,58 @@ mod tests {
                 .any(|spec| spec.params.iter().any(|param| param.advanced)),
             "the comparison covers advanced parameters"
         );
+    }
+
+    #[test]
+    fn plots_cross_the_c_abi() {
+        unsafe extern "C" fn record(
+            ctx: *mut std::ffi::c_void,
+            x_step: f32,
+            samples: *const f32,
+            len: usize,
+        ) {
+            // SAFETY: the test passes its vector as `ctx`, and the plugin side a valid
+            // slice, both for the call.
+            unsafe {
+                let frames = &mut *ctx.cast::<Vec<(f32, Vec<f32>)>>();
+                frames.push((x_step, std::slice::from_raw_parts(samples, len).to_vec()));
+            }
+        }
+
+        // SAFETY: as in `builds_a_working_node_through_the_c_abi`.
+        let plugin = unsafe {
+            DynamicPlugin::from_ffi(ffi::export(|| v_signal_nodes_plugin_std::StdPlugin), None)
+        }
+        .unwrap();
+        let mut host = PluginHost::new();
+        host.load(&plugin).unwrap();
+        let oscillograph = v_signal_nodes_plugin_std::OSCILLOGRAPH;
+        let spec = Arc::clone(host.spec(oscillograph).unwrap());
+        let mut processor = host.create_processor(oscillograph).unwrap();
+        processor.prepare(1000.0, 64).unwrap();
+
+        let mut frames = Vec::<(f32, Vec<f32>)>::new();
+        let sinks = [RawPlotSink {
+            ctx: std::ptr::from_mut(&mut frames).cast(),
+            publish: record,
+        }];
+        // A sweep of 10 samples, free run, so the block holds one whole.
+        let params = [
+            ParamValue::Number(10.0),
+            ParamValue::Choice(0),
+            ParamValue::Number(0.0),
+        ];
+        let input = [0.5; 10];
+        let inputs = [RawBuffer::input(&input)];
+        // SAFETY: a mono buffer of 10 frames, as the spec wants, and no outputs; the
+        // sink's vector outlives the call and nothing else touches it.
+        let mut io =
+            unsafe { ProcessIo::from_raw(10, &spec, &params, &inputs, &[]).with_plots(&sinks) };
+        processor.process(&mut io).unwrap();
+
+        assert_eq!(frames.len(), 1);
+        assert!((frames[0].0 - 0.001).abs() < 1e-6, "{}", frames[0].0);
+        assert_eq!(frames[0].1, [0.5; 10]);
     }
 
     #[test]

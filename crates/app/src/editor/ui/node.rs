@@ -21,9 +21,9 @@
 //! ```text
 //!   pos
 //!    ┌──────────────────────────────┐ ─┬─
-//!    │ Gain #3                  ✕   │  │ CONTENT_TOP: tinted header (title, delete)
+//!    │ Amplifier #3            ⋯ ✕  │  │ CONTENT_TOP: tinted header (title, buttons)
 //!    │                              │ ─┴─
-//!    ● Audio in         Audio out   ●    socket row 0, ROW_HEIGHT tall
+//!    ● In                     Out   ●    socket row 0, ROW_HEIGHT tall
 //!    │        [ Gain: 1.0 ]         │    parameter row 0
 //!    └──────────────────────────────┘
 //!    ◄───────── NODE_WIDTH ─────────►
@@ -32,9 +32,11 @@
 //! Socket rows come first: row `i` holds input `i` on the left edge and output `i`
 //! on the right edge. Parameter rows follow below, centered, one per parameter that
 //! isn't advanced, so parameters never overlap socket labels. Advanced ones have no
-//! row; a node having any gets a button in its header ([`params`](super::params)).
-//! The node is tall enough for all rows, but at least [`MIN_NODE_HEIGHT`]; the size
-//! depends only on the spec ([`node_size`]).
+//! row. Every window of the node gets a button in its header ([`NodeWindow`]): one
+//! for the advanced parameters if it has any, two per window its spec declares (a
+//! preview in the editor, a separate window). The node is tall enough for all rows,
+//! but at least [`MIN_NODE_HEIGHT`], and wider than [`NODE_WIDTH`] if its buttons need
+//! it; the size depends only on the spec ([`node_size`]).
 
 use std::sync::Arc;
 
@@ -45,8 +47,13 @@ use v_signal_nodes_core::{
 
 use crate::editor::{Language, Text};
 
-/// Width of every node.
-const NODE_WIDTH: f32 = 160.0;
+/// Width of a node with at most [`WINDOW_BUTTONS_IN_WIDTH`] window buttons.
+const NODE_WIDTH: f32 = 176.0;
+/// Side of the square buttons in a node's header.
+pub(super) const HEADER_BUTTON_SIZE: f32 = 18.0;
+/// Window buttons that fit beside the title in a node of [`NODE_WIDTH`]; each further
+/// one makes the node wider by its size.
+const WINDOW_BUTTONS_IN_WIDTH: usize = 2;
 /// Height of a node with a single row.
 const MIN_NODE_HEIGHT: f32 = 90.0;
 /// Height of one socket/parameter row.
@@ -93,15 +100,18 @@ fn params_by_advanced(spec: &NodeSpec, advanced: bool) -> impl Iterator<Item = u
     params.filter_map(move |(index, param)| (param.advanced == advanced).then_some(index))
 }
 
-/// Size of a node of `spec`: [`NODE_WIDTH`] wide, tall enough for the socket rows
-/// plus one row per parameter that isn't advanced.
+/// Size of a node of `spec`: wide enough for its window buttons, tall enough for the
+/// socket rows plus one row per parameter that isn't advanced.
 ///
 /// The single source of node size: the node itself, the drop preview and the
 /// canvas extent all use it.
 pub(in crate::editor) fn node_size(spec: &NodeSpec) -> egui::Vec2 {
     let row_count = (socket_rows(spec) + params_by_advanced(spec, false).count()).max(1);
+    let advanced = params_by_advanced(spec, true).next().is_some();
+    let window_buttons = usize::from(advanced) + spec.windows.len() * 2;
+    let extra_buttons = window_buttons.saturating_sub(WINDOW_BUTTONS_IN_WIDTH);
     egui::vec2(
-        NODE_WIDTH,
+        NODE_WIDTH + HEADER_BUTTON_SIZE * extra_buttons as f32,
         MIN_NODE_HEIGHT.max(CONTENT_TOP + ROW_HEIGHT * row_count as f32 + 8.0),
     )
 }
@@ -140,6 +150,18 @@ impl SocketRef {
             Self::Output(output) => output.index,
         }
     }
+}
+
+/// A window of a node, opened with a button in its header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(in crate::editor) enum NodeWindow {
+    /// The node's advanced parameters.
+    AdvancedParams,
+    /// The window at this index of the spec's
+    /// [`windows`](v_signal_nodes_core::NodeSpec::windows), floating inside the editor.
+    Preview(usize),
+    /// The same window as a separate window of the system.
+    Separate(usize),
 }
 
 /// A node placed on the canvas, as seen for one frame: its id, the graph node
@@ -195,9 +217,37 @@ impl<'a> NodeWidget<'a> {
         params_by_advanced(self.spec(), true)
     }
 
-    /// Whether the node has a window to open.
-    pub(super) fn has_advanced_params(&self) -> bool {
-        self.advanced_params().next().is_some()
+    /// The windows the node can open, in the order of their header buttons from the
+    /// right: the advanced parameters if it has any, then for each one its spec
+    /// declares a preview and a separate window.
+    pub(super) fn windows(&self) -> impl Iterator<Item = NodeWindow> + 'a {
+        let advanced = self
+            .advanced_params()
+            .next()
+            .map(|_| NodeWindow::AdvancedParams);
+        let declared = (0..self.spec().windows.len())
+            .flat_map(|index| [NodeWindow::Preview(index), NodeWindow::Separate(index)]);
+        advanced.into_iter().chain(declared)
+    }
+
+    /// Name of `window` in `language`.
+    pub(super) fn window_name(&self, window: NodeWindow, language: Language) -> &'a str {
+        match window {
+            NodeWindow::AdvancedParams => language.text(Text::AdvancedParams),
+            NodeWindow::Preview(index) | NodeWindow::Separate(index) => {
+                self.text(TextKey::Window(&self.spec().windows[index].id), language)
+            }
+        }
+    }
+
+    /// What the button of `window` does, in `language`, for its tooltip.
+    pub(super) fn window_hint(&self, window: NodeWindow, language: Language) -> String {
+        let name = self.window_name(window, language);
+        match window {
+            NodeWindow::AdvancedParams => name.to_owned(),
+            NodeWindow::Preview(_) => format!("{name}: {}", language.text(Text::WindowPreview)),
+            NodeWindow::Separate(_) => format!("{name}: {}", language.text(Text::WindowSeparate)),
+        }
     }
 
     /// Name of parameter `index` in `language`.
@@ -213,7 +263,7 @@ impl<'a> NodeWidget<'a> {
     }
 
     /// `Name: value` of parameter `index` in `language`, for example "Gain: 1.0"
-    /// or "Режим: стерео".
+    /// or "Форма: синус".
     pub(super) fn param_label(&self, index: usize, language: Language) -> String {
         let name = self.param_name(index, language);
         let value = match self.node.params()[index] {
@@ -254,7 +304,7 @@ impl<'a> NodeWidget<'a> {
         egui::pos2(
             match side {
                 SocketDirection::Input => self.pos.x,
-                SocketDirection::Output => self.pos.x + NODE_WIDTH,
+                SocketDirection::Output => self.rect().right(),
             },
             self.pos.y + CONTENT_TOP + ROW_HEIGHT * (index as f32 + 0.5),
         )
@@ -265,7 +315,7 @@ impl<'a> NodeWidget<'a> {
     pub(super) fn param_pos(&self, row: usize) -> egui::Pos2 {
         let row = socket_rows(self.spec()) + row;
         egui::pos2(
-            self.pos.x + NODE_WIDTH * 0.5,
+            self.rect().center().x,
             self.pos.y + CONTENT_TOP + ROW_HEIGHT * (row as f32 + 0.5),
         )
     }
@@ -274,7 +324,7 @@ impl<'a> NodeWidget<'a> {
     pub(super) fn param_rect(&self, row: usize) -> egui::Rect {
         egui::Rect::from_center_size(
             self.param_pos(row),
-            egui::vec2(NODE_WIDTH - PARAM_INSET * 2.0, PARAM_HEIGHT),
+            egui::vec2(self.rect().width() - PARAM_INSET * 2.0, PARAM_HEIGHT),
         )
     }
 }
@@ -292,7 +342,7 @@ pub(in crate::editor) fn std_kind(type_id: &str) -> NodeKind {
 mod tests {
     use super::*;
     use v_signal_nodes_core::{Graph, NodeSocket, ParamSpec};
-    use v_signal_nodes_plugin_std::{GAIN, MIXER, SOURCE};
+    use v_signal_nodes_plugin_std::{GAIN, MIXER, OSCILLOGRAPH, SOURCE};
 
     /// A graph holding one node of `spec`, and its id.
     fn one_node(spec: Arc<NodeSpec>) -> (Graph, NodeId) {
@@ -357,11 +407,50 @@ mod tests {
 
         assert_eq!(node.inline_params().collect::<Vec<_>>(), [1]);
         assert_eq!(node.advanced_params().collect::<Vec<_>>(), [0, 2]);
-        assert!(node.has_advanced_params());
+        assert_eq!(
+            node.windows().collect::<Vec<_>>(),
+            [NodeWindow::AdvancedParams]
+        );
         assert_eq!(node.rect().size(), node_size(&everyday));
         let (graph, id) = one_node(Arc::new(everyday));
         let node = NodeWidget::new(id, graph.node(id).unwrap(), egui::Pos2::ZERO);
-        assert!(!node.has_advanced_params());
+        assert_eq!(node.windows().count(), 0);
+    }
+
+    #[test]
+    fn a_node_has_a_window_for_advanced_params_and_two_for_each_declared_one() {
+        let (graph, id) = one_node(std_spec(OSCILLOGRAPH));
+        let node = NodeWidget::new(id, graph.node(id).unwrap(), egui::Pos2::ZERO);
+
+        assert_eq!(
+            node.windows().collect::<Vec<_>>(),
+            [
+                NodeWindow::AdvancedParams,
+                NodeWindow::Preview(0),
+                NodeWindow::Separate(0)
+            ]
+        );
+        assert_eq!(
+            node.window_name(NodeWindow::Separate(0), Language::Russian),
+            "Экран"
+        );
+        assert_eq!(
+            node.window_hint(NodeWindow::Preview(0), Language::Russian),
+            "Экран: предпросмотр"
+        );
+        assert_eq!(
+            node.window_hint(NodeWindow::AdvancedParams, Language::English),
+            "Advanced parameters"
+        );
+    }
+
+    #[test]
+    fn a_node_widens_only_for_buttons_that_do_not_fit() {
+        assert_eq!(node_size(&std_spec(GAIN)).x, NODE_WIDTH);
+        assert_eq!(
+            node_size(&std_spec(OSCILLOGRAPH)).x,
+            NODE_WIDTH + HEADER_BUTTON_SIZE
+        );
     }
 
     #[test]

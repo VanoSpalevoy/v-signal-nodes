@@ -6,10 +6,11 @@
 //! same plan, so connection rules, order and buffers can't drift apart between
 //! them. Compiling needs no device or real-time thread and is tested on its own.
 //!
-//! What runs: only nodes that reach an output node ([`NodeKind::Output`]); the rest
-//! produce nothing anyone reads. A graph without output nodes doesn't compile
-//! ([`CompileError::NoOutput`]). [`Plan::outputs`] lists what the output nodes
-//! read, for whoever delivers it (a device driver, a file, a display).
+//! What runs: only nodes that reach a node ending a chain ([`NodeKind::ends_chain`]:
+//! an output node or an instrument); the rest produce nothing anyone reads. A graph
+//! without such nodes doesn't compile ([`CompileError::NoOutput`]). [`Plan::outputs`]
+//! lists what the output nodes read, for whoever delivers it (a device driver, a
+//! file); instruments take what they need themselves and aren't in it.
 //!
 //! Buffers: a socket's channels one after another
 //! ([`BufferShape::buffer_len`]). Unconnected inputs read [`Input::Silence`]: the
@@ -165,7 +166,7 @@ impl Plan {
 /// Why a graph can't be compiled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompileError {
-    /// No node is an output ([`NodeKind::Output`]), so nothing would be delivered.
+    /// No node ends a chain ([`NodeKind::ends_chain`]), so nothing would use the signal.
     NoOutput,
     /// The output can't feed the input: different rates, or channel counts that
     /// differ with neither side mono ([`NodeSocket::can_feed`]). [`Graph::connect`]
@@ -177,7 +178,7 @@ pub enum CompileError {
 impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoOutput => f.write_str("the graph has no output node"),
+            Self::NoOutput => f.write_str("the graph has no output or instrument node"),
             Self::Incompatible { from, to } => write!(
                 f,
                 "output {} of node {} can't feed input {} of node {}",
@@ -207,10 +208,10 @@ impl Logical {
     }
 }
 
-/// Compiles `graph` into a [`Plan`]: steps of the nodes that reach an output node,
-/// in [`Graph::topo_order`], with buffers reused by lifetime (see the module docs).
-/// Fails if there is no output node or on the first connection between those nodes
-/// whose sockets don't fit (see [`CompileError`]).
+/// Compiles `graph` into a [`Plan`]: steps of the nodes that reach a node ending a
+/// chain, in [`Graph::topo_order`], with buffers reused by lifetime (see the module
+/// docs). Fails if no node ends a chain or on the first connection between those
+/// nodes whose sockets don't fit (see [`CompileError`]).
 pub fn compile(graph: &Graph) -> Result<Plan, CompileError> {
     let kept = reaching_outputs(graph);
     if kept.is_empty() {
@@ -333,11 +334,11 @@ pub fn compile(graph: &Graph) -> Result<Plan, CompileError> {
     })
 }
 
-/// The nodes with a path to an output node, output nodes included.
+/// The nodes with a path to a node ending a chain, those nodes included.
 fn reaching_outputs(graph: &Graph) -> HashSet<NodeId> {
     let mut stack: Vec<NodeId> = graph
         .nodes()
-        .filter(|(_, node)| node.spec().kind == NodeKind::Output)
+        .filter(|(_, node)| node.spec().kind.ends_chain())
         .map(|(id, _)| id)
         .collect();
     let mut kept = HashSet::new();
@@ -553,6 +554,19 @@ mod tests {
         let thru = thru(&mut graph);
         connect(&mut graph, source, thru);
         assert_eq!(compile(&graph), Err(CompileError::NoOutput));
+    }
+
+    #[test]
+    fn an_instrument_runs_its_chain_but_delivers_nothing() {
+        let mut graph = Graph::new();
+        let source = source(&mut graph);
+        let scope = graph.add(Node::new(spec(NodeKind::Instrument, &[mono_in()], &[])));
+        connect(&mut graph, source, scope);
+
+        let plan = compile(&graph).unwrap();
+
+        assert_eq!(plan.steps().len(), 2);
+        assert!(plan.outputs().is_empty());
     }
 
     #[test]

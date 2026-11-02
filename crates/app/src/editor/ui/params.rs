@@ -1,11 +1,12 @@
-//! Editing node parameters: the control of one parameter, and the windows with
-//! nodes' advanced parameters.
+//! Editing node parameters: the control of one parameter, and the contents of the
+//! window with a node's advanced parameters.
 //!
 //! A parameter is shown in one of two places, decided by its spec
 //! ([`ParamSpec::advanced`](v_signal_nodes_core::ParamSpec::advanced)): everyday ones
-//! on the node (`canvas::controls`), advanced ones in a window of their own, opened
-//! with the button in the node's header. Both use [`param_control`], which only
-//! reports the new value; every change goes through `VSignalNodesApp::set_param`.
+//! on the node (`canvas::controls`), advanced ones in a window of their own
+//! ([`windows`](super::windows)), opened with a button in the node's header. Both use
+//! [`param_control`], which only reports the new value; every change goes through
+//! `VSignalNodesApp::set_param`.
 //!
 //! | Parameter | Control                                                    |
 //! |-----------|------------------------------------------------------------|
@@ -17,7 +18,7 @@ use eframe::egui;
 use v_signal_nodes_core::{ParamKind, ParamValue};
 
 use super::{NodeWidget, caption};
-use crate::editor::{Language, Text, VSignalNodesApp};
+use crate::editor::{Language, Text};
 
 /// Part of a number's value one point of dragging changes.
 const DRAG_RELATIVE_SPEED: f64 = 0.005;
@@ -87,124 +88,29 @@ fn drag_speed(value: f32, min: f32, max: f32) -> f64 {
     }
 }
 
-/// Shows the window of every node whose advanced parameters are open, and applies
-/// what was changed in them.
-pub(super) fn show_advanced_windows(app: &mut VSignalNodesApp, ui: &egui::Ui) {
-    let mut edits = Vec::new();
-    let mut closed = Vec::new();
+/// The contents of `node`'s advanced parameters window, in `language`. Returns what
+/// was changed this frame, as `(parameter index, new value)`.
+pub(super) fn advanced_window(
+    ui: &mut egui::Ui,
+    node: &NodeWidget,
+    language: Language,
+) -> Vec<(usize, ParamValue)> {
     let layout = egui::Layout::centered_and_justified(egui::Direction::LeftToRight);
-    // Only the first frame of a window uses it: it opens where its button was clicked.
-    let pointer = ui.input(|input| input.pointer.latest_pos());
-    for &node_id in &app.advanced_windows {
-        let Some(node) = app.node(node_id) else {
-            continue;
-        };
-        let mut open = true;
-        let mut window = egui::Window::new(format!("{} #{}", node.title(app.language), node.id))
-            .id(ui.scope_id().with(("advanced_params", node_id)))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(WINDOW_CONTROL_WIDTH);
-        if let Some(pointer) = pointer {
-            window = window.default_pos(pointer);
-        }
-        window.show(ui.ctx(), |ui| {
-            caption(ui, app.language.text(Text::AdvancedParams));
-            let size = egui::vec2(WINDOW_CONTROL_WIDTH, ui.spacing().interact_size.y);
-            for index in node.advanced_params() {
-                let edit = ui.allocate_ui_with_layout(size, layout, |ui| {
-                    param_control(ui, &node, index, app.language)
-                });
-                if let Some(value) = edit.inner {
-                    edits.push((node_id, index, value));
-                }
-            }
-        });
-        if !open {
-            closed.push(node_id);
-        }
-    }
-    for (node_id, index, value) in edits {
-        app.set_param(node_id, index, value);
-    }
-    for node_id in closed {
-        app.toggle_advanced_window(node_id);
-    }
+    caption(ui, language.text(Text::AdvancedParams));
+    let size = egui::vec2(WINDOW_CONTROL_WIDTH, ui.spacing().interact_size.y);
+    node.advanced_params()
+        .filter_map(|index| {
+            let edit = ui.allocate_ui_with_layout(size, layout, |ui| {
+                param_control(ui, node, index, language)
+            });
+            edit.inner.map(|value| (index, value))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::tests::add;
-    use crate::editor::ui::headless::{self, Frames};
-    use crate::editor::ui::{install_theme, render};
-    use v_signal_nodes_core::NodeId;
-    use v_signal_nodes_plugin_std::MIXER;
-
-    /// The editor without a window: whole frames, with pointer events.
-    struct Editor {
-        frames: Frames,
-        app: VSignalNodesApp,
-    }
-
-    impl Editor {
-        /// An editor with a mixer, its advanced window opened with the pointer at `at`.
-        fn with_window(at: egui::Pos2) -> (Self, NodeId) {
-            let frames = Frames::new();
-            install_theme(&frames.ctx);
-            let mut app = VSignalNodesApp::default();
-            let mixer = add(&mut app, MIXER, egui::pos2(500.0, 300.0));
-            let mut editor = Self { frames, app };
-            editor.frame(vec![egui::Event::PointerMoved(at)]);
-            editor.app.toggle_advanced_window(mixer);
-            editor.frame(Vec::new());
-            editor.frame(Vec::new());
-            (editor, mixer)
-        }
-
-        fn frame(&mut self, events: Vec<egui::Event>) {
-            let app = &mut self.app;
-            self.frames.run(events, |ui| render(app, ui));
-        }
-
-        fn click(&mut self, pos: egui::Pos2) {
-            for events in headless::click(pos) {
-                self.frame(events);
-            }
-        }
-    }
-
-    #[test]
-    fn the_advanced_window_opens_at_the_pointer_and_edits_the_node() {
-        let at = egui::pos2(100.0, 300.0);
-        let (mut editor, mixer) = Editor::with_window(at);
-        assert_eq!(
-            editor.app.graph.node(mixer).unwrap().param("mode"),
-            Some(ParamValue::Choice(1))
-        );
-
-        // Mode, the first control, below the title and the caption.
-        let mode = at + egui::vec2(60.0, 71.0);
-        editor.click(mode);
-        // Its first option, "mono", right below it.
-        editor.click(mode + egui::vec2(0.0, 36.0));
-
-        assert_eq!(
-            editor.app.graph.node(mixer).unwrap().param("mode"),
-            Some(ParamValue::Choice(0))
-        );
-    }
-
-    #[test]
-    fn a_window_goes_with_its_node() {
-        let (mut editor, mixer) = Editor::with_window(egui::pos2(100.0, 300.0));
-
-        editor.app.remove_node(mixer);
-        editor.frame(Vec::new());
-
-        assert!(editor.app.advanced_windows.is_empty());
-    }
 
     #[test]
     fn dragging_follows_the_value_and_never_stops_at_zero() {

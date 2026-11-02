@@ -7,7 +7,6 @@ members = [
     "crates/plugin-api",
     "crates/plugin-host",
     "crates/plugin-std",
-    "crates/plugin-stub-oscillograph",
     "crates/app",
 ]
 
@@ -25,7 +24,7 @@ eframe = "0.37.0"
 cpal = "0.18.2"
 libloading = "0.9.0"
 # Lock-free queues to and from the real-time thread (`runtime::realtime`,
-# `plugin-stub-oscillograph`).
+# `runtime::plots`).
 rtrb = "0.4.1"
 # Only the macOS menu bar uses it; the default `gtk3` feature is Linux-only.
 muda = { version = "0.21.2", default-features = false }
@@ -37,7 +36,6 @@ v-signal-nodes-device = { path = "crates/device" }
 v-signal-nodes-plugin-api = { path = "crates/plugin-api" }
 v-signal-nodes-plugin-host = { path = "crates/plugin-host" }
 v-signal-nodes-plugin-std = { path = "crates/plugin-std" }
-v-signal-nodes-plugin-stub-oscillograph = { path = "crates/plugin-stub-oscillograph" }
 
 [workspace.lints.clippy]
 # Every `unsafe` block carries a `// SAFETY:` comment; keep it that way.

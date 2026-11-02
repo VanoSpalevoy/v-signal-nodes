@@ -146,7 +146,7 @@ impl VSignalNodesApp {
         self.connection_refused = None;
         self.requested_node = None;
         self.drag = None;
-        self.advanced_windows.clear();
+        self.open_windows.clear();
         self.routes = RouteCache::default();
         Ok(())
     }
@@ -158,17 +158,16 @@ mod tests {
     use crate::editor::tests::assert_apart;
     use v_signal_nodes_core::{NodeId, ParamValue};
     use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE};
-    use v_signal_nodes_plugin_stub_oscillograph::OSCILLOGRAPH;
 
-    /// An app with source 0 → gain 1 → mixer 2 (inputs 0 and 1) and an oscillograph
-    /// node 3, and their ids.
+    /// An app with source 0 → gain 1 → mixer 2 (inputs 0 and 1) and an unconnected
+    /// source 3, and their ids.
     fn sample_graph() -> (VSignalNodesApp, Vec<NodeId>) {
         let mut app = VSignalNodesApp::default();
         let ids: Vec<_> = [
             (SOURCE, 0.0, 0.0),
             (GAIN, 250.0, 0.0),
             (MIXER, 500.0, 0.0),
-            (OSCILLOGRAPH, 250.0, 300.0),
+            (SOURCE, 250.0, 300.0),
         ]
         .into_iter()
         .map(|(type_id, x, y)| {
@@ -201,7 +200,7 @@ mod tests {
         app.raise_node(ids[0]);
         let document = app.to_document();
 
-        assert_eq!(document.used_plugins, ["std", "stub-oscillograph"]);
+        assert_eq!(document.used_plugins, ["std"]);
         assert_eq!(document.nodes.len(), 4);
         assert_eq!(document.nodes[3].id, 0, "paint order is kept");
         assert_eq!(document.connections.len(), 3);
@@ -311,7 +310,7 @@ mod tests {
             ),
             (
                 "param out of range",
-                Box::new(set_gain(ParamValue::Number(9.0))),
+                Box::new(set_gain(ParamValue::Number(1000.0))),
             ),
             (
                 "param of the wrong kind",

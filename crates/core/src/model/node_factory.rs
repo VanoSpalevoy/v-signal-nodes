@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::model::{
     MAX_CHANNELS, Node, NodeKind, NodeSocket, ParamKind, ParamSpec, ParamValue, SocketDirection,
+    WindowSpec,
 };
 use crate::{Error, SpecProblem};
 
@@ -37,6 +38,8 @@ pub struct NodeSpec {
     pub outputs: Vec<NodeSocket>,
     /// Parameters; ids must be unique.
     pub params: Vec<ParamSpec>,
+    /// Windows a node can open; ids must be unique.
+    pub windows: Vec<WindowSpec>,
     /// Translations of the labels above.
     pub translations: Vec<Translation>,
 }
@@ -64,6 +67,8 @@ pub enum TextKey<S = String> {
     Param(S),
     /// Option `index` of the choice parameter with this id.
     Option(S, usize),
+    /// Name of the window with this [`id`](WindowSpec::id).
+    Window(S),
 }
 
 impl TextKey {
@@ -97,6 +102,7 @@ impl<S: AsRef<str>> TextKey<S> {
             Self::Output(index) => TextKey::Output(*index),
             Self::Param(id) => TextKey::Param(id.as_ref()),
             Self::Option(id, index) => TextKey::Option(id.as_ref(), *index),
+            Self::Window(id) => TextKey::Window(id.as_ref()),
         }
     }
 }
@@ -138,6 +144,7 @@ impl NodeSpec {
             inputs: Vec::new(),
             outputs: Vec::new(),
             params: Vec::new(),
+            windows: Vec::new(),
             translations: Vec::new(),
         }
     }
@@ -163,6 +170,12 @@ impl NodeSpec {
     /// Adds a parameter.
     pub fn param(mut self, param: ParamSpec) -> Self {
         self.params.push(param);
+        self
+    }
+
+    /// Adds a window.
+    pub fn window(mut self, window: WindowSpec) -> Self {
+        self.windows.push(window);
         self
     }
 
@@ -200,13 +213,18 @@ impl NodeSpec {
         self.params.iter().find(|param| param.id == id)
     }
 
+    /// Position of window `id` in [`windows`](Self::windows).
+    pub fn window_index(&self, id: &str) -> Option<usize> {
+        self.windows.iter().position(|window| window.id == id)
+    }
+
     /// The values a new node starts with, in [`params`](Self::params) order.
     pub fn default_params(&self) -> Vec<ParamValue> {
         self.params.iter().map(ParamSpec::default_value).collect()
     }
 
-    /// Every label of the spec: the name, the inputs and outputs, then each
-    /// parameter followed by its choice options.
+    /// Every label of the spec: the name, the inputs and outputs, each parameter
+    /// followed by its choice options, then the windows.
     pub fn text_keys(&self) -> impl Iterator<Item = TextKey<&str>> {
         let sockets = (0..self.inputs.len())
             .map(TextKey::Input)
@@ -220,7 +238,14 @@ impl NodeSpec {
             std::iter::once(TextKey::Param(id))
                 .chain((0..options).map(move |index| TextKey::Option(id, index)))
         });
-        std::iter::once(TextKey::Name).chain(sockets).chain(params)
+        let windows = self
+            .windows
+            .iter()
+            .map(|window| TextKey::Window(window.id.as_str()));
+        std::iter::once(TextKey::Name)
+            .chain(sockets)
+            .chain(params)
+            .chain(windows)
     }
 
     /// The English label `key` refers to, or `None` if there's no such label.
@@ -234,6 +259,11 @@ impl NodeSpec {
                 ParamKind::Choice { options, .. } => options.get(index).map(String::as_str),
                 _ => None,
             },
+            TextKey::Window(id) => self
+                .windows
+                .iter()
+                .find(|window| window.id == id)
+                .map(|window| window.name.as_str()),
         }
     }
 
@@ -253,10 +283,10 @@ impl NodeSpec {
 
     /// Checks the spec is usable: non-empty type id and name, sockets in the right
     /// list with `1..=MAX_CHANNELS` channels, socket names unique per direction,
-    /// sockets that fit the kind (generators need an output, outputs an input,
-    /// processors both; a generator may still have inputs, e.g. modulation),
-    /// valid parameters with unique ids, and translations of existing labels, at
-    /// most one per language and label.
+    /// sockets that fit the kind (generators need an output, outputs and instruments
+    /// an input, processors both; a generator may still have inputs, e.g. modulation),
+    /// valid parameters with unique ids, windows with unique ids and names, and
+    /// translations of existing labels, at most one per language and label.
     pub fn validate(&self) -> Result<(), Error> {
         self.find_problem().map_or(Ok(()), |problem| {
             Err(Error::InvalidSpec {
@@ -304,7 +334,7 @@ impl NodeSpec {
         let fits_kind = match self.kind {
             NodeKind::Generator => has_outputs,
             NodeKind::Processor => has_inputs && has_outputs,
-            NodeKind::Output => has_inputs,
+            NodeKind::Output | NodeKind::Instrument => has_inputs,
         };
         if !fits_kind {
             return Some(SpecProblem::SocketsDontFitKind {
@@ -324,6 +354,16 @@ impl NodeSpec {
             }
             if !ids.insert(param.id.as_str()) {
                 return Some(SpecProblem::DuplicateParam(param.id.clone()));
+            }
+        }
+
+        let mut window_ids = HashSet::new();
+        for window in &self.windows {
+            if window.id.trim().is_empty() || window.name.trim().is_empty() {
+                return Some(SpecProblem::UnnamedWindow(window.id.clone()));
+            }
+            if !window_ids.insert(window.id.as_str()) {
+                return Some(SpecProblem::DuplicateWindow(window.id.clone()));
             }
         }
 

@@ -62,8 +62,20 @@ bits are planned.
   through a C ABI, with an API version check and panics caught at the boundary.
 - **Two languages.** An English or Russian interface. Plugins translate their
   own node labels, and nodes on the canvas switch language with the editor.
-- **Standard nodes:** `std.source` (sine/square/saw/triangle), `std.gain`,
-  `std.mixer`, `std.sink`.
+- **Node windows.** A node can have windows, opened with buttons in its header:
+  its advanced parameters, and windows its plugin declares, such as a plot. A
+  declared window has two buttons: a preview floating inside the editor, and a
+  separate system window that can leave the main window, be above or behind it and
+  fill the screen. The editor draws them, so a plugin needs no UI code, also across
+  the C ABI.
+- **Standard nodes for analog electrical signals,** where every sample is a voltage
+  in volts: `std.source` (a generator: sine/square/saw/triangle, frequency,
+  amplitude, phase, offset; generators of one frequency keep their set phases, so 0°
+  and 180° add up to zero), `std.gain` (an amplifier, inverting if negative, with
+  optional clipping at its supply), `std.mixer` (a summing amplifier, sample by
+  sample), `std.sink` (the output to the
+  device, 1 V is full scale) and `std.oscillograph` (a triggered sweep on a screen
+  in its window; it needs no output node and nothing it looks at is heard).
 
 ## Getting started
 
@@ -115,9 +127,7 @@ flowchart LR
     host --> api["plugin-api<br/>contract + C ABI"]
     api --> core
     std["plugin-std<br/>std.*"] --> api
-    stub["plugin-stub-oscillograph"] --> api
     app --> std
-    app --> stub
     dylib["your plugin<br/>.dll / .so / .dylib"] -. C ABI .-> host
 ```
 
@@ -128,7 +138,6 @@ flowchart LR
 | `crates/plugin-api`   | The plugin contract and its C ABI (`ffi`)                      |
 | `crates/plugin-host`  | Loads plugins (linked or from a dynamic library), builds nodes and their processors |
 | `crates/plugin-std`   | The standard nodes (`std.*`), the reference plugin            |
-| `crates/plugin-stub-oscillograph` | A placeholder oscillograph with no graphics: passes the signal through and prints min/max/RMS to stdout |
 | `crates/runtime`      | Graph processing: runs a compiled plan, on a real-time thread or in one parallel pass |
 | `crates/device`       | The first device driver: the default output, through `cpal`    |
 
@@ -138,7 +147,7 @@ API docs: `cargo doc --workspace --no-deps --open`.
 
 A plugin depends only on `v-signal-nodes-plugin-api`. It registers one
 `NodeProvider` per node type. A provider describes its node type with a
-`NodeSpec` and creates a `NodeProcessor`, which holds the DSP state, for every
+`NodeSpec` and creates a `NodeProcessor`, which holds the signal state, for every
 node placed on the canvas.
 
 ```rust

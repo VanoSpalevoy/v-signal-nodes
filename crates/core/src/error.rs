@@ -62,8 +62,8 @@ pub enum SpecProblem {
         socket: String,
         channels: u16,
     },
-    /// The sockets don't fit the kind: generators need an output, outputs an
-    /// input, processors both.
+    /// The sockets don't fit the kind: generators need an output, outputs and
+    /// instruments an input, processors both.
     SocketsDontFitKind {
         kind: NodeKind,
         inputs: usize,
@@ -75,6 +75,9 @@ pub enum SpecProblem {
         problem: ParamProblem,
     },
     DuplicateParam(String),
+    /// A window without an id or a name.
+    UnnamedWindow(String),
+    DuplicateWindow(String),
     /// A translation of a label the spec doesn't have.
     TranslationOfMissingLabel(TextKey),
     DuplicateTranslation {
@@ -153,6 +156,8 @@ impl fmt::Display for SpecProblem {
             ),
             Self::Param { param, problem } => write!(f, "parameter '{param}': {problem}"),
             Self::DuplicateParam(param) => write!(f, "duplicate parameter '{param}'"),
+            Self::UnnamedWindow(id) => write!(f, "window '{id}' needs an id and a name"),
+            Self::DuplicateWindow(id) => write!(f, "duplicate window '{id}'"),
             Self::TranslationOfMissingLabel(key) => {
                 write!(f, "translation of a missing label {key:?}")
             }

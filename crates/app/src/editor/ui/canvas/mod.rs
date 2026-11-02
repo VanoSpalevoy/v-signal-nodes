@@ -51,7 +51,10 @@
 //! | secondary click output socket           | remove every connection from that output        |
 //! | secondary click input socket            | remove the connection into that input           |
 //! | primary click `✕`                       | delete the node and its connections             |
-//! | primary click the `⋯` in a node header  | open or close its advanced parameters window    |
+//! | primary click a window button in a node | open or close that window: `⋯` for the          |
+//! | header                                  | advanced parameters, a wave for a plot's        |
+//! |                                         | preview, an arrow out of a frame for its        |
+//! |                                         | separate window                                 |
 //! | use a control in a parameter row        | change the parameter (see [`params`](super::params)) |
 //! | click empty canvas, or `Esc`            | clear the pending source                        |
 //! | drop a palette button on the canvas     | add a node centered on the pointer              |
@@ -97,16 +100,15 @@ mod paint;
 use eframe::egui;
 
 use super::placement::NODE_GAP;
-use super::{NodeKind, node_size, place_new_node};
+use super::{NodeKind, NodeWindow, node_size, place_new_node};
 use crate::editor::{NodeWidget, SocketRef, VSignalNodesApp};
 pub(in crate::editor) use connections::RouteCache;
 use v_signal_nodes_core::{NodeId, SocketDirection};
 
 /// Height of the tinted header band holding the title and the delete button.
 const HEADER_HEIGHT: f32 = 28.0;
-/// Side of the square delete and advanced parameters buttons in the node header's
-/// right end.
-const DELETE_BUTTON_SIZE: f32 = 18.0;
+/// Side of the square delete and window buttons in the node header's right end.
+const DELETE_BUTTON_SIZE: f32 = super::node::HEADER_BUTTON_SIZE;
 /// Distance of the delete button from the node's top-right corner.
 const NODE_INSET: f32 = 5.0;
 /// Side of a socket's square hit area; larger than the dot so it's easy to hit.
@@ -154,7 +156,7 @@ impl View {
 struct Hovered {
     socket: Option<SocketRef>,
     delete_button: Option<NodeId>,
-    advanced_button: Option<NodeId>,
+    window_button: Option<(NodeId, NodeWindow)>,
 }
 
 /// The scroll state of the last frame, to keep the view centered across zoom changes.
@@ -312,10 +314,11 @@ fn delete_button_rect(node: &NodeWidget) -> egui::Rect {
     )
 }
 
-/// The advanced parameters button's area in canvas coordinates: next to the delete
-/// button, on its left.
-fn advanced_button_rect(node: &NodeWidget) -> egui::Rect {
-    delete_button_rect(node).translate(egui::vec2(-DELETE_BUTTON_SIZE, 0.0))
+/// The area of the `slot`-th window button of a node ([`NodeWidget::windows`]) in canvas
+/// coordinates: in a row going left from the delete button.
+fn window_button_rect(node: &NodeWidget, slot: usize) -> egui::Rect {
+    let distance = DELETE_BUTTON_SIZE * (slot + 1) as f32;
+    delete_button_rect(node).translate(egui::vec2(-distance, 0.0))
 }
 
 #[cfg(test)]
@@ -327,7 +330,7 @@ mod tests {
     use v_signal_nodes_core::{
         Node, NodeKind as Role, NodeSocket, NodeSpec, ParamSpec, ParamValue,
     };
-    use v_signal_nodes_plugin_std::{GAIN, MIXER, SOURCE};
+    use v_signal_nodes_plugin_std::{GAIN, OSCILLOGRAPH, SINK, SOURCE};
 
     /// A headless canvas: node interaction and controls, in the order of a real frame,
     /// without the panels and the scroll area, so screen = canvas × `scale`.
@@ -387,10 +390,10 @@ mod tests {
             self.view.rect(node.param_rect(row)).center()
         }
 
-        /// The center on screen of the advanced parameters button of `node`.
-        fn advanced_button(&self, node: NodeId) -> egui::Pos2 {
+        /// The center on screen of the `slot`-th window button of `node`.
+        fn window_button(&self, node: NodeId, slot: usize) -> egui::Pos2 {
             let node = self.app.node(node).unwrap();
-            self.view.rect(advanced_button_rect(&node)).center()
+            self.view.rect(window_button_rect(&node, slot)).center()
         }
 
         fn param(&self, node: NodeId, id: &str) -> ParamValue {
@@ -464,24 +467,39 @@ mod tests {
     }
 
     #[test]
-    fn the_button_opens_and_closes_the_advanced_window_of_nodes_that_have_one() {
+    fn each_button_opens_and_closes_its_window_of_nodes_that_have_one() {
         let mut canvas = Canvas::new(1.0);
-        let mixer = canvas.add(MIXER);
-        let button = canvas.advanced_button(mixer);
+        let scope = canvas.add(OSCILLOGRAPH);
+        let advanced = canvas.window_button(scope, 0);
+        let preview = canvas.window_button(scope, 1);
+        let separate = canvas.window_button(scope, 2);
 
         canvas.frame(Vec::new());
-        canvas.click(button);
-        assert_eq!(canvas.app.advanced_windows, [mixer]);
+        canvas.click(preview);
+        assert_eq!(canvas.app.open_windows, [(scope, NodeWindow::Preview(0))]);
 
-        canvas.click(button);
-        assert!(canvas.app.advanced_windows.is_empty());
+        canvas.click(separate);
+        canvas.click(advanced);
+        assert_eq!(
+            canvas.app.open_windows,
+            [
+                (scope, NodeWindow::Preview(0)),
+                (scope, NodeWindow::Separate(0)),
+                (scope, NodeWindow::AdvancedParams)
+            ]
+        );
+
+        canvas.click(preview);
+        canvas.click(separate);
+        canvas.click(advanced);
+        assert!(canvas.app.open_windows.is_empty());
 
         let mut canvas = Canvas::new(1.0);
-        let gain = canvas.add(GAIN);
-        let button = canvas.advanced_button(gain);
+        let sink = canvas.add(SINK);
+        let button = canvas.window_button(sink, 0);
         canvas.frame(Vec::new());
         canvas.click(button);
-        assert!(canvas.app.advanced_windows.is_empty(), "nothing to open");
+        assert!(canvas.app.open_windows.is_empty(), "nothing to open");
     }
 
     #[test]

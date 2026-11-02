@@ -5,10 +5,16 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use v_signal_nodes_core::{Graph, InputRef, NodeId, OutputRef, ParamValue, compile};
+use v_signal_nodes_core::{
+    Error, Graph, InputRef, NodeId, NodeKind, NodeSocket, NodeSpec, OutputRef, ParamValue, Step,
+    compile,
+};
+use v_signal_nodes_plugin_api::{
+    NodeProcessor, NodeProvider, Plugin, PluginError, ProcessIo, Registrar,
+};
 use v_signal_nodes_plugin_host::PluginHost;
-use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE, StdPlugin};
-use v_signal_nodes_runtime::realtime;
+use v_signal_nodes_plugin_std::{GAIN, MIXER, OSCILLOGRAPH, SINK, SOURCE, StdPlugin};
+use v_signal_nodes_runtime::{plots, realtime};
 
 /// Counts the calls made while [`COUNTING`] is on, on this thread only.
 struct Counting;
@@ -59,6 +65,54 @@ fn allocator_calls(work: impl FnOnce()) -> usize {
     CALLS.get()
 }
 
+/// Type id of [`StereoSink`].
+const STEREO_SINK: &str = "test.stereo_sink";
+
+/// An output node with a stereo input, which a mono signal goes through a conversion
+/// for: the standard nodes are all mono.
+struct StereoSink;
+
+impl NodeProvider for StereoSink {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec::new(STEREO_SINK, "Stereo sink", NodeKind::Output)
+            .input(NodeSocket::signal_in("in").with_channels(2))
+    }
+
+    fn create_processor(&self) -> Box<dyn NodeProcessor> {
+        Box::new(StereoSinkProcessor)
+    }
+}
+
+struct StereoSinkProcessor;
+
+impl NodeProcessor for StereoSinkProcessor {
+    fn process(&mut self, _io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+struct StereoSinkPlugin;
+
+impl Plugin for StereoSinkPlugin {
+    fn name(&self) -> &str {
+        "test"
+    }
+
+    fn version(&self) -> &str {
+        "0.1.0"
+    }
+
+    fn register(&self, registrar: &mut dyn Registrar) {
+        registrar.register_node(Box::new(StereoSink));
+    }
+}
+
+/// A processor for `step`, as the editor makes them: with plots if it has windows.
+fn make_processor(host: &PluginHost, step: &Step) -> Result<Box<dyn NodeProcessor>, Error> {
+    let processor = host.create_processor(&step.spec.type_id)?;
+    Ok(plots::with_plots(processor, step.spec.windows.len()).0)
+}
+
 fn add(graph: &mut Graph, host: &PluginHost, type_id: &str) -> NodeId {
     graph.add(host.build_node(type_id).unwrap())
 }
@@ -73,18 +127,22 @@ fn connect(graph: &mut Graph, from: NodeId, to: NodeId, input: usize) {
 fn the_real_time_thread_doesnt_allocate() {
     let mut host = PluginHost::new();
     host.load(&StdPlugin).unwrap();
+    host.load(&StereoSinkPlugin).unwrap();
     let mut graph = Graph::new();
     let source = add(&mut graph, &host, SOURCE);
     let gain = add(&mut graph, &host, GAIN);
     let mixer = add(&mut graph, &host, MIXER);
     let sink = add(&mut graph, &host, SINK);
-    let direct = add(&mut graph, &host, SINK);
+    let direct = add(&mut graph, &host, STEREO_SINK);
+    let scope = add(&mut graph, &host, OSCILLOGRAPH);
     connect(&mut graph, source, gain, 0);
     connect(&mut graph, gain, mixer, 0);
     connect(&mut graph, source, mixer, 1);
     connect(&mut graph, mixer, sink, 0);
     // Mono into a stereo input: goes through a conversion.
     connect(&mut graph, source, direct, 0);
+    // Publishes sweeps for its window: the device block is longer than a sweep.
+    connect(&mut graph, mixer, scope, 0);
     let factor = graph
         .node(gain)
         .unwrap()
@@ -93,7 +151,7 @@ fn the_real_time_thread_doesnt_allocate() {
         .unwrap();
 
     let (mut controller, mut renderer) = realtime::channel(48_000.0, 64);
-    let make = |step: &v_signal_nodes_core::Step| host.create_processor(&step.spec.type_id);
+    let make = |step: &Step| make_processor(&host, step);
     let mut device = vec![0.0; 2048];
 
     controller.run_plan(compile(&graph).unwrap(), make).unwrap();

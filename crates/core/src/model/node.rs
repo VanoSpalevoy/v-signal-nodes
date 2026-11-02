@@ -84,8 +84,20 @@ pub enum NodeKind {
     Generator,
     /// A node that processes a signal.
     Processor,
-    /// A node that outputs a signal.
+    /// A node that outputs a signal: what it reads goes to the device.
     Output,
+    /// A measuring instrument at the end of a chain: it runs like an output node but
+    /// delivers nothing to the device, so looking at a signal doesn't make it heard.
+    /// It shows what it measures in its windows.
+    Instrument,
+}
+
+impl NodeKind {
+    /// Whether nodes of this kind end a chain: they run, and so does whatever feeds
+    /// them, with or without anything after them.
+    pub fn ends_chain(self) -> bool {
+        matches!(self, Self::Output | Self::Instrument)
+    }
 }
 
 #[cfg(test)]

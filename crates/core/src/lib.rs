@@ -23,9 +23,9 @@ pub mod plan;
 pub use crate::error::{Error, ParamProblem, SpecProblem};
 pub use graph::{Graph, GraphError, InputRef, NodeId, OutputRef};
 pub use model::{
-    ChoiceParam, MAX_CHANNELS, Node, NodeFactory, NodeKind, NodeSocket, NodeSpec, NumberParam,
-    ParamKey, ParamKind, ParamSpec, ParamValue, Rgb, SignalRate, SocketDirection, TextKey,
-    ToggleParam, Translation,
+    AxisUnit, ChoiceParam, MAX_CHANNELS, MAX_PLOT_POINTS, Node, NodeFactory, NodeKind, NodeSocket,
+    NodeSpec, NumberParam, ParamKey, ParamKind, ParamSpec, ParamValue, PlotWindow, Rgb, SignalRate,
+    SocketDirection, TextKey, ToggleParam, Translation, WindowContent, WindowSpec,
 };
 pub use plan::{
     BufferId, BufferShape, CompileError, Conversion, Input, Plan, PlanOutput, Step, compile,

@@ -2,7 +2,7 @@
 //!
 //! A [`Plugin`] registers one [`NodeProvider`] per node type through a
 //! [`Registrar`]. A provider describes its node type with a [`NodeSpec`] and
-//! creates a fresh [`NodeProcessor`] (the DSP state) for every node instance.
+//! creates a fresh [`NodeProcessor`] (the signal state) for every node instance.
 //!
 //! The same traits serve both ways of loading a plugin:
 //!
@@ -18,9 +18,10 @@
 //! What a plugin builds against is this crate's own items plus the spec types it
 //! re-exports from `v-signal-nodes-core`: [`NodeSpec`] and what it's made of
 //! ([`NodeKind`], [`Rgb`], [`NodeSocket`], [`SocketDirection`], [`SignalRate`],
-//! [`MAX_CHANNELS`], [`ParamSpec`], [`ParamKind`], [`TextKey`], [`Translation`]),
-//! [`ParamValue`] and the typed parameter keys ([`ParamKey`], [`NumberParam`],
-//! [`ChoiceParam`], [`ToggleParam`]). A change to any of them is a change to the
+//! [`MAX_CHANNELS`], [`ParamSpec`], [`ParamKind`], [`WindowSpec`], [`WindowContent`],
+//! [`AxisUnit`], [`TextKey`], [`Translation`]), [`ParamValue`] and the typed keys
+//! ([`ParamKey`], [`NumberParam`], [`ChoiceParam`], [`ToggleParam`], [`PlotWindow`]).
+//! A change to any of them is a change to the
 //! plugin API. The rest of `core` (the graph-side `Node`, `NodeFactory`,
 //! `Error`) is the host's business and isn't exposed; plugins report errors
 //! with [`PluginError`]. Dynamic libraries don't see the Rust types at all, only
@@ -28,7 +29,13 @@
 //! as long as [`ffi`] doesn't.
 //!
 //! Parameters are declared once as key constants; the spec and the reads in
-//! `process` both use them, so they can't disagree on the id or the kind:
+//! `process` both use them, so they can't disagree on the id or the kind.
+//!
+//! A node shows more than its controls through windows, declared in its spec
+//! ([`NodeSpec::window`]) and drawn by the host, which gives the node one button per
+//! window. A plot window ([`PlotWindow`]) shows the frames `process` publishes with
+//! [`ProcessIo::plot`], without allocating or waiting; publishing costs next to
+//! nothing while no window looks at it.
 //!
 //! ```ignore
 //! use v_signal_nodes_plugin_api::*;
@@ -74,6 +81,7 @@
 // This is the contract plugin authors build against: everything public is documented.
 #![warn(missing_docs)]
 
+use std::ffi::c_void;
 use std::fmt;
 use std::marker::PhantomData;
 use std::slice;
@@ -81,8 +89,9 @@ use std::slice;
 pub mod ffi;
 
 pub use v_signal_nodes_core::{
-    ChoiceParam, MAX_CHANNELS, NodeKind, NodeSocket, NodeSpec, NumberParam, ParamKey, ParamKind,
-    ParamSpec, ParamValue, Rgb, SignalRate, SocketDirection, TextKey, ToggleParam, Translation,
+    AxisUnit, ChoiceParam, MAX_CHANNELS, MAX_PLOT_POINTS, NodeKind, NodeSocket, NodeSpec,
+    NumberParam, ParamKey, ParamKind, ParamSpec, ParamValue, PlotWindow, Rgb, SignalRate,
+    SocketDirection, TextKey, ToggleParam, Translation, WindowContent, WindowSpec,
 };
 
 /// Version of this API. The host refuses dynamic libraries built against another
@@ -90,7 +99,7 @@ pub use v_signal_nodes_core::{
 /// so they always match).
 ///
 /// Bump it on any change to the traits or to the [`ffi`] types.
-pub const API_VERSION: u32 = 4;
+pub const API_VERSION: u32 = 6;
 
 /// An error reported by a plugin.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,7 +141,7 @@ impl From<PluginError> for v_signal_nodes_core::Error {
 pub trait NodeProcessor: Send {
     /// Gets ready to process at `sample_rate` samples per second, in blocks of at
     /// most `max_frames`. The place to allocate buffers: `process` runs on the
-    /// audio thread and shouldn't. Does nothing by default.
+    /// real-time thread and shouldn't. Does nothing by default.
     fn prepare(&mut self, sample_rate: f32, max_frames: usize) -> Result<(), PluginError> {
         let _ = (sample_rate, max_frames);
         Ok(())
@@ -205,13 +214,26 @@ impl RawBuffer {
     }
 }
 
+/// Where the frames of one plot window go: a function of the host and its state, so
+/// it can cross the C ABI unchanged. The host keeps `publish` from panicking, and
+/// from allocating or waiting, as it runs on the real-time thread.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RawPlotSink {
+    /// The host's state.
+    pub ctx: *mut c_void,
+    /// Takes `len` samples at `samples`, `x_step` apart on the plot's horizontal axis.
+    pub publish:
+        unsafe extern "C" fn(ctx: *mut c_void, x_step: f32, samples: *const f32, len: usize),
+}
+
 /// Everything a node gets for one [`process`](NodeProcessor::process) call:
 /// parameter values, input samples and output buffers for a block of `frames`.
 ///
 /// Inputs and outputs are in socket order of the node's [`NodeSpec`]; parameters in
 /// the order of [`NodeSpec::params`], read by key with [`get`](Self::get). Each
 /// socket's buffer holds its channels one after another, each
-/// [`NodeSocket::channel_len`] long (`frames` at audio rate, one value at control
+/// [`NodeSocket::channel_len`] long (`frames` at sample rate, one value at control
 /// rate); [`input_channels`](Self::input_channels) /
 /// [`output_channels`](Self::output_channels) split it. Outputs start zeroed. The
 /// sample rate isn't here: it comes with [`prepare`](NodeProcessor::prepare).
@@ -221,6 +243,9 @@ pub struct ProcessIo<'a> {
     params: &'a [ParamValue],
     inputs: &'a [RawBuffer],
     outputs: &'a [RawBuffer],
+    /// One per window of the spec, or none when nothing shows them.
+    plots: &'a [RawPlotSink],
+    position: u64,
     _samples: PhantomData<&'a mut [f32]>,
 }
 
@@ -246,11 +271,39 @@ impl<'a> ProcessIo<'a> {
             params,
             inputs,
             outputs,
+            plots: &[],
+            position: 0,
             _samples: PhantomData,
         }
     }
 
-    /// Number of frames (samples per audio-rate channel) in this block.
+    /// The same call for a block starting `position` frames into the run.
+    pub fn with_position(mut self, position: u64) -> Self {
+        self.position = position;
+        self
+    }
+
+    /// Frames of the run before this block, the same for every node. Whatever depends
+    /// on time should use this rather than count for itself: a node added during a run
+    /// then still agrees with the others (two generators stay in phase). Starts over
+    /// after [`reset`](NodeProcessor::reset).
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    /// The same call with `plots` receiving what [`plot`](Self::plot) publishes.
+    ///
+    /// # Safety
+    ///
+    /// `plots` must be empty or hold one sink per window of the spec, each callable
+    /// with its `ctx` for `'a`.
+    pub unsafe fn with_plots(mut self, plots: &'a [RawPlotSink]) -> Self {
+        debug_assert!(plots.is_empty() || plots.len() == self.spec.windows.len());
+        self.plots = plots;
+        self
+    }
+
+    /// Number of frames (samples per sample-rate channel) in this block.
     pub fn frames(&self) -> usize {
         self.frames
     }
@@ -328,9 +381,31 @@ impl<'a> ProcessIo<'a> {
         self.output(index).chunks_exact_mut(len.max(1))
     }
 
+    /// Publishes one frame to plot window `key`: `samples` (at most
+    /// [`MAX_PLOT_POINTS`], the rest is cut off), `x_step` apart on the horizontal
+    /// axis. Allocates nothing and never waits: a frame nobody has room for is lost.
+    /// Fails if the spec has no such window: a plugin bug, like in [`get`](Self::get).
+    pub fn plot(&self, key: PlotWindow, x_step: f32, samples: &[f32]) -> Result<(), PluginError> {
+        let Some(index) = self.spec.window_index(key.0) else {
+            return Err(PluginError::new(format!("no window '{}'", key.0)));
+        };
+        if let Some(sink) = self.plots.get(index) {
+            let len = samples.len().min(MAX_PLOT_POINTS);
+            // SAFETY: `with_plots` guarantees the sink can be called; the samples
+            // are valid for the call and the host only reads them.
+            unsafe { (sink.publish)(sink.ctx, x_step, samples.as_ptr(), len) };
+        }
+        Ok(())
+    }
+
     /// The raw parts, for hosts that forward the call (e.g. across the C ABI).
     pub fn raw_parts(&mut self) -> (usize, &'a [ParamValue], &'a [RawBuffer], &'a [RawBuffer]) {
         (self.frames, self.params, self.inputs, self.outputs)
+    }
+
+    /// The plot sinks, for hosts that forward the call.
+    pub fn raw_plots(&self) -> &'a [RawPlotSink] {
+        self.plots
     }
 }
 
@@ -376,10 +451,10 @@ mod tests {
     const LEVEL: NumberParam = NumberParam("level");
     const ON: ToggleParam = ToggleParam("on");
 
-    /// A stereo audio input, a 2-channel control input and a stereo output.
+    /// A stereo sample-rate input, a 2-channel control input and a stereo output.
     fn spec() -> NodeSpec {
         NodeSpec::new("test.io", "IO", NodeKind::Processor)
-            .input(NodeSocket::signal_in("audio").with_channels(2))
+            .input(NodeSocket::signal_in("signal").with_channels(2))
             .input(NodeSocket::control_in("control").with_channels(2))
             .output(NodeSocket::signal_out("out").with_channels(2))
             .param(LEVEL.spec("Level", 0.0, 1.0, 0.5))
@@ -388,10 +463,10 @@ mod tests {
     #[test]
     fn splits_buffers_into_channels_and_reads_params_by_key() {
         let spec = spec();
-        let audio = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let signal = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let control = [0.25, 0.75];
         let mut out = [0.0; 6];
-        let inputs = [RawBuffer::input(&audio), RawBuffer::input(&control)];
+        let inputs = [RawBuffer::input(&signal), RawBuffer::input(&control)];
         let outputs = [RawBuffer::output(&mut out)];
         let params = [ParamValue::Number(0.5)];
         // SAFETY: buffers sized by `buffer_len(3)` of each socket, live for the
@@ -412,12 +487,63 @@ mod tests {
         assert_eq!(out, [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
     }
 
+    /// A frame as it reaches the sink in `plot_goes_to_the_sink_of_its_window`.
+    unsafe extern "C" fn record(ctx: *mut c_void, x_step: f32, samples: *const f32, len: usize) {
+        // SAFETY: the test passes a `Vec` as `ctx`, and `plot` a valid slice.
+        unsafe {
+            let frames = &mut *ctx.cast::<Vec<(f32, Vec<f32>)>>();
+            frames.push((x_step, slice_from_raw(samples, len).to_vec()));
+        }
+    }
+
+    #[test]
+    fn plot_goes_to_the_sink_of_its_window() {
+        const FIRST: PlotWindow = PlotWindow("first");
+        const SECOND: PlotWindow = PlotWindow("second");
+        let spec = NodeSpec::new("test.io", "IO", NodeKind::Instrument)
+            .input(NodeSocket::signal_in("in"))
+            .window(FIRST.spec("First", AxisUnit::Seconds, AxisUnit::Volts))
+            .window(SECOND.spec("Second", AxisUnit::Seconds, AxisUnit::Volts));
+        let mut first = Vec::<(f32, Vec<f32>)>::new();
+        let mut second = Vec::<(f32, Vec<f32>)>::new();
+        let sink = |frames: &mut Vec<(f32, Vec<f32>)>| RawPlotSink {
+            ctx: std::ptr::from_mut(frames).cast(),
+            publish: record,
+        };
+        let sinks = [sink(&mut first), sink(&mut second)];
+        let inputs = [RawBuffer::input(&[])];
+        // SAFETY: zero frames, so an empty buffer per socket; the sinks' vectors live
+        // for the call and nothing else touches them meanwhile.
+        let io = unsafe { ProcessIo::from_raw(0, &spec, &[], &inputs, &[]).with_plots(&sinks) };
+
+        io.plot(SECOND, 0.5, &[1.0, 2.0]).unwrap();
+        assert!(io.plot(PlotWindow("missing"), 0.5, &[]).is_err());
+        let too_long = vec![0.0; MAX_PLOT_POINTS + 1];
+        io.plot(FIRST, 1.0, &too_long).unwrap();
+
+        assert_eq!(second, [(0.5, vec![1.0, 2.0])]);
+        assert_eq!(first[0].1.len(), MAX_PLOT_POINTS);
+    }
+
+    #[test]
+    fn plot_without_sinks_goes_nowhere() {
+        const SCREEN: PlotWindow = PlotWindow("screen");
+        let spec = NodeSpec::new("test.io", "IO", NodeKind::Instrument)
+            .input(NodeSocket::signal_in("in"))
+            .window(SCREEN.spec("Screen", AxisUnit::Seconds, AxisUnit::Volts));
+        let inputs = [RawBuffer::input(&[])];
+        // SAFETY: zero frames, so an empty buffer per socket.
+        let io = unsafe { ProcessIo::from_raw(0, &spec, &[], &inputs, &[]) };
+
+        assert!(io.plot(SCREEN, 1.0, &[1.0]).is_ok());
+    }
+
     #[test]
     fn an_empty_block_has_no_channels_to_split() {
         let spec = spec();
         let inputs = [RawBuffer::input(&[]), RawBuffer::input(&[0.0, 0.0])];
         let outputs = [RawBuffer::output(&mut [])];
-        // SAFETY: zero frames: empty audio buffers, one value per control channel.
+        // SAFETY: zero frames: empty sample-rate buffers, one value per control channel.
         let mut io = unsafe { ProcessIo::from_raw(0, &spec, &[], &inputs, &outputs) };
 
         assert_eq!(io.input_channels(0).count(), 0);

@@ -15,20 +15,31 @@
 //!   ([`send_param`](Execution::send_param)), so moving a control is cheap.
 //! - **One pass** ([`Command::RunAsync`](super::commands::Command)): a background
 //!   thread runs the plan once over [`ONE_PASS_FRAMES`] in big blocks, branches in
-//!   parallel, and sends back a summary. There is no file or display output yet, so
-//!   the summary is what comes of it.
+//!   parallel, and sends back a summary. There is no file output yet, so the summary
+//!   and the plot windows are what comes of it.
 //!
 //! Both are polled once per frame by [`update`](VSignalNodesApp::update_execution).
+//!
+//! Nodes with plot windows get their processor wrapped when it's created
+//! ([`make_processor`]). It publishes from whichever thread runs it, and a window
+//! reads the newest frame from the node's [`PlotFeed`] ([`Execution::plot_feed`]) on
+//! its own schedule; the last frame stays on show after a run ends.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use v_signal_nodes_core::{CompileError, NodeId, ParamValue, Plan, compile};
+use v_signal_nodes_core::{CompileError, Error, NodeId, ParamValue, Plan, Step, compile};
 use v_signal_nodes_device::{DeviceError, Output, OutputStream};
+use v_signal_nodes_plugin_host::PluginHost;
+#[cfg(test)]
+use v_signal_nodes_runtime::plots::PlotFrame;
+use v_signal_nodes_runtime::plots::{self, PlotReader};
 use v_signal_nodes_runtime::realtime::{self, Controller};
-use v_signal_nodes_runtime::{Engine, RuntimeError, processors_for};
+use v_signal_nodes_runtime::{Engine, NodeProcessor, RuntimeError, processors_for};
 
 use super::VSignalNodesApp;
 
@@ -42,6 +53,37 @@ const ONE_PASS_FRAMES: usize = 1 << 20;
 const ONE_PASS_SAMPLE_RATE: f32 = 48_000.0;
 /// How often the UI wakes up to poll what's running.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Where the plots of one window of a node arrive. Shared, because that window repaints
+/// on its own, also while the main window doesn't.
+pub(super) type PlotFeed = Arc<Mutex<PlotReader>>;
+
+/// The reader of `feed`. Nothing holding it can leave it half-changed, so a panic
+/// elsewhere while it was held doesn't matter.
+pub(super) fn read_feed(feed: &PlotFeed) -> MutexGuard<'_, PlotReader> {
+    feed.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A new processor for `step`, publishing to `plots` if its node has windows. The
+/// feeds replace those of an earlier processor of the node.
+fn make_processor(
+    plugins: &PluginHost,
+    plots: &mut HashMap<NodeId, Vec<PlotFeed>>,
+    step: &Step,
+) -> Result<Box<dyn NodeProcessor>, Error> {
+    let processor = plugins.create_processor(&step.spec.type_id)?;
+    let windows = step.spec.windows.len();
+    if windows == 0 {
+        return Ok(processor);
+    }
+    let (processor, readers) = plots::with_plots(processor, windows);
+    let feeds = readers
+        .into_iter()
+        .map(|reader| Arc::new(Mutex::new(reader)))
+        .collect();
+    plots.insert(step.node, feeds);
+    Ok(processor)
+}
 
 /// A real-time run in progress.
 struct RealtimeRun {
@@ -75,6 +117,8 @@ pub(super) struct Execution {
     one_pass_result: Option<OnePassSummary>,
     /// What went wrong with the last run, in the system's or the plugin's words.
     failure: Option<String>,
+    /// Where the plots of nodes with windows arrive, one per window of the node.
+    plots: HashMap<NodeId, Vec<PlotFeed>>,
 }
 
 impl Default for Execution {
@@ -88,6 +132,7 @@ impl Default for Execution {
             one_pass: None,
             one_pass_result: None,
             failure: None,
+            plots: HashMap::new(),
         }
     }
 }
@@ -112,6 +157,17 @@ impl Execution {
 
     pub(super) fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
+    }
+
+    /// Where the plots of window `window` of `node` arrive, once a run made one.
+    pub(super) fn plot_feed(&self, node: NodeId, window: usize) -> Option<PlotFeed> {
+        self.plots.get(&node)?.get(window).cloned()
+    }
+
+    /// The newest frame published to window `window` of `node`, if any.
+    #[cfg(test)]
+    fn plot_frame(&self, node: NodeId, window: usize) -> Option<PlotFrame> {
+        read_feed(&self.plot_feed(node, window)?).latest().cloned()
     }
 
     /// Passes a changed parameter on to the running device, which takes it from its
@@ -153,9 +209,19 @@ impl VSignalNodesApp {
         self.send_outdated_plan();
         self.poll_realtime();
         self.poll_one_pass();
+        self.poll_plots();
         if self.execution.realtime.is_some() || self.execution.one_pass.is_some() {
             ctx.request_repaint_after(POLL_INTERVAL);
         }
+    }
+
+    /// Takes in the newest plots, and forgets those of nodes that are gone.
+    fn poll_plots(&mut self) {
+        let graph = &self.graph;
+        self.execution.plots.retain(|&node, feeds| {
+            feeds.iter().for_each(|feed| read_feed(feed).poll());
+            graph.contains(node)
+        });
     }
 
     /// Starts real-time processing on the default output device, or stops it.
@@ -187,8 +253,9 @@ impl VSignalNodesApp {
         let (mut controller, renderer) =
             realtime::channel(output.sample_rate(), REALTIME_MAX_FRAMES);
         let plugins = &self.plugins;
+        let plots = &mut self.execution.plots;
         controller
-            .run_plan(plan, |step| plugins.create_processor(&step.spec.type_id))
+            .run_plan(plan, |step| make_processor(plugins, plots, step))
             .map_err(|err| err.to_string())?;
         let (errors, device_errors) = mpsc::channel();
         let stream = output
@@ -214,10 +281,11 @@ impl VSignalNodesApp {
             execution.plan_outdated = false;
             return;
         };
+        let plots = &mut execution.plots;
         let result = match compile(&self.graph) {
             Ok(plan) => run
                 .controller
-                .run_plan(plan, |step| plugins.create_processor(&step.spec.type_id)),
+                .run_plan(plan, |step| make_processor(plugins, plots, step)),
             // Nothing valid to run: silence, until the graph compiles again. The
             // reason is already shown as the compile error.
             Err(_) => run.controller.clear(),
@@ -270,12 +338,12 @@ impl VSignalNodesApp {
         }
     }
 
-    fn build_one_pass_engine(&self) -> Result<Engine, String> {
+    fn build_one_pass_engine(&mut self) -> Result<Engine, String> {
         let plan = self.compile_graph().map_err(|err| err.to_string())?;
-        let processors = processors_for(&plan, &[], |step| {
-            self.plugins.create_processor(&step.spec.type_id)
-        })
-        .map_err(|err| err.to_string())?;
+        let plugins = &self.plugins;
+        let plots = &mut self.execution.plots;
+        let processors = processors_for(&plan, &[], |step| make_processor(plugins, plots, step))
+            .map_err(|err| err.to_string())?;
         Engine::new(plan, processors, ONE_PASS_SAMPLE_RATE, ONE_PASS_MAX_FRAMES)
             .map_err(|err| err.to_string())
     }
@@ -326,7 +394,7 @@ mod tests {
     use super::*;
     use crate::editor::commands::Command;
     use v_signal_nodes_core::{InputRef, OutputRef};
-    use v_signal_nodes_plugin_std::{GAIN, SINK, SOURCE};
+    use v_signal_nodes_plugin_std::{GAIN, OSCILLOGRAPH, SINK, SOURCE};
 
     /// An app with source → gain → sink.
     fn runnable() -> VSignalNodesApp {
@@ -427,6 +495,41 @@ mod tests {
         assert!(!app.execution.is_running_realtime());
     }
 
+    /// Generator → oscillograph on the real device: sweeps reach the window from the
+    /// real-time thread, and without an output node nothing is heard. Ignored like the
+    /// test above.
+    #[test]
+    #[ignore = "needs an output device"]
+    fn the_real_time_thread_feeds_the_plot_window() {
+        let mut app = VSignalNodesApp::default();
+        let ctx = egui::Context::default();
+        let source = app
+            .add_node_at(app.kind_of(SOURCE).unwrap(), egui::Pos2::ZERO)
+            .unwrap();
+        let scope = app
+            .add_node_at(app.kind_of(OSCILLOGRAPH).unwrap(), egui::pos2(300.0, 0.0))
+            .unwrap();
+        assert!(app.connect(OutputRef::new(source, 0), InputRef::new(scope, 0)));
+        app.refresh_compile_status();
+
+        app.execute(Command::RunRealtime);
+        assert_eq!(app.execution.failure(), None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.execution.plot_frame(scope, 0).is_none() {
+            assert!(Instant::now() < deadline, "no sweep reached the window");
+            app.update_execution(&ctx);
+            thread::sleep(Duration::from_millis(5));
+        }
+        app.execute(Command::RunRealtime);
+
+        let frame = app.execution.plot_frame(scope, 0).unwrap();
+        let peak = frame
+            .samples
+            .iter()
+            .fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        assert!((peak - 1.0).abs() < 0.05, "{peak}");
+    }
+
     /// A changed parameter goes straight to the running device: no recompiling, no new
     /// plan. The gain has no input, so it's silent. Ignored like the test above.
     #[test]
@@ -467,7 +570,47 @@ mod tests {
 
         let plan = app.compile_graph().unwrap();
         let step = plan.steps().iter().find(|step| step.node == gain).unwrap();
-        assert_eq!(step.params, [ParamValue::Number(0.5)]);
+        assert_eq!(step.params[0], ParamValue::Number(0.5));
+    }
+
+    /// A voltage on the screen of an oscillograph, without any device: a one-pass run
+    /// of generator → oscillograph, with no output node.
+    #[test]
+    fn a_run_reaches_the_plot_window() {
+        let mut app = VSignalNodesApp::default();
+        let ctx = egui::Context::default();
+        let source = app
+            .add_node_at(app.kind_of(SOURCE).unwrap(), egui::Pos2::ZERO)
+            .unwrap();
+        let scope = app
+            .add_node_at(app.kind_of(OSCILLOGRAPH).unwrap(), egui::pos2(300.0, 0.0))
+            .unwrap();
+        assert!(app.connect(OutputRef::new(source, 0), InputRef::new(scope, 0)));
+        app.refresh_compile_status();
+        assert_eq!(app.execution.plot_frame(scope, 0), None);
+
+        app.execute(Command::RunAsync);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while app.execution.is_running_one_pass() {
+            assert!(Instant::now() < deadline, "the run doesn't finish");
+            app.update_execution(&ctx);
+            thread::sleep(Duration::from_millis(5));
+        }
+        app.update_execution(&ctx);
+
+        assert_eq!(app.execution.failure(), None);
+        let frame = app.execution.plot_frame(scope, 0).unwrap();
+        // A 1 V sine, triggered on its rising edge through 0 V.
+        assert!(frame.samples[0].abs() < 0.2, "{}", frame.samples[0]);
+        let peak = frame
+            .samples
+            .iter()
+            .fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        assert!((peak - 1.0).abs() < 0.05, "{peak}");
+
+        app.remove_node(scope);
+        app.update_execution(&ctx);
+        assert_eq!(app.execution.plot_frame(scope, 0), None);
     }
 
     #[test]

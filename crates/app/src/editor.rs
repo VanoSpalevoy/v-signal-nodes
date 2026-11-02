@@ -24,7 +24,7 @@ mod persistence;
 mod ui;
 
 use localization::{Language, Text};
-use ui::{NodeKind, NodeWidget, RouteCache, SocketRef};
+use ui::{ClosedWindows, NodeKind, NodeWidget, NodeWindow, RouteCache, SocketRef};
 
 /// Maximum number of nodes on the canvas.
 const MAX_NODE_COUNT: usize = 512;
@@ -35,7 +35,7 @@ const MAX_NODE_COUNT: usize = 512;
 /// no cycles, ids of removed nodes never reused) are kept by `core::Graph`.
 /// Invariants the editor itself must keep on every add/remove path:
 /// - `positions` and `z_order` hold exactly the nodes of `graph`, each once;
-/// - `pending_source`, `drag` and `advanced_windows` only refer to nodes that exist;
+/// - `pending_source`, `drag` and `open_windows` only refer to nodes that exist;
 /// - `node_limit_reached` is set only by a failed [`add_node_at`](Self::add_node_at)
 ///   and cleared by the next successful add or any deletion;
 /// - nodes never overlap, except the dragged node while the drag lasts: adds go
@@ -72,8 +72,11 @@ pub struct VSignalNodesApp {
     scale: f32,
     /// The node being dragged on the canvas, if any.
     drag: Option<NodeDrag>,
-    /// The nodes whose advanced parameters windows are open, each once, oldest first.
-    advanced_windows: Vec<NodeId>,
+    /// The open windows of nodes, each once, oldest first.
+    open_windows: Vec<(NodeId, NodeWindow)>,
+    /// System windows the user closed, until the next frame takes them out of
+    /// `open_windows`.
+    closed_windows: ClosedWindows,
     /// Connection routes, derived from the graph and the layout and brought up to
     /// date by the canvas every frame. Never saved.
     routes: RouteCache,
@@ -115,7 +118,8 @@ impl Default for VSignalNodesApp {
             language: Language::English,
             scale: 1.0,
             drag: None,
-            advanced_windows: Vec::new(),
+            open_windows: Vec::new(),
+            closed_windows: ClosedWindows::default(),
             routes: RouteCache::default(),
             plugins,
             palette,
@@ -126,20 +130,17 @@ impl Default for VSignalNodesApp {
     }
 }
 
-/// A plugin host with the plugins linked into the editor: `std` and the
-/// `stub-oscillograph` placeholder. They are part of the build, so failing to load
-/// one is a bug.
+/// A plugin host with the plugins linked into the editor: only `std`. It's part of
+/// the build, so failing to load it is a bug.
 fn builtin_plugins() -> PluginHost {
     let mut host = PluginHost::new();
     host.load(&v_signal_nodes_plugin_std::StdPlugin)
         .expect("the std plugin loads");
-    host.load(&v_signal_nodes_plugin_stub_oscillograph::StubOscillographPlugin)
-        .expect("the stub-oscillograph plugin loads");
     host
 }
 
-/// Every node type of `plugins`, in palette order: generators, then processors,
-/// then outputs (the order a signal flows), by type id within each group.
+/// Every node type of `plugins`, in palette order: generators, then processors, then
+/// outputs and instruments (the order a signal flows), by type id within each group.
 fn palette(plugins: &PluginHost) -> Vec<NodeKind> {
     use v_signal_nodes_core::NodeKind as Role;
     let mut kinds: Vec<_> = plugins.specs().cloned().map(NodeKind::new).collect();
@@ -148,6 +149,7 @@ fn palette(plugins: &PluginHost) -> Vec<NodeKind> {
         Role::Generator => 0,
         Role::Processor => 1,
         Role::Output => 2,
+        Role::Instrument => 3,
     });
     kinds
 }
@@ -261,7 +263,7 @@ impl VSignalNodesApp {
         self.positions.remove(&node_id);
         self.z_order.retain(|&id| id != node_id);
         self.node_limit_reached = false;
-        self.advanced_windows.retain(|&id| id != node_id);
+        self.open_windows.retain(|&(id, _)| id != node_id);
         if self.dragged_node() == Some(node_id) {
             self.drag = None;
         }
@@ -292,12 +294,18 @@ impl VSignalNodesApp {
         true
     }
 
-    /// Opens the window with the advanced parameters of a node, or closes it.
-    fn toggle_advanced_window(&mut self, node_id: NodeId) {
-        if let Some(index) = self.advanced_windows.iter().position(|&id| id == node_id) {
-            self.advanced_windows.remove(index);
+    /// Closes a window of a node, if it's open.
+    fn close_window(&mut self, node_id: NodeId, window: NodeWindow) {
+        self.open_windows.retain(|&open| open != (node_id, window));
+    }
+
+    /// Opens a window of a node, or closes it.
+    fn toggle_window(&mut self, node_id: NodeId, window: NodeWindow) {
+        let entry = (node_id, window);
+        if let Some(index) = self.open_windows.iter().position(|&open| open == entry) {
+            self.open_windows.remove(index);
         } else if self.graph.contains(node_id) {
-            self.advanced_windows.push(node_id);
+            self.open_windows.push(entry);
         }
     }
 
@@ -489,8 +497,7 @@ impl eframe::App for VSignalNodesApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE};
-    use v_signal_nodes_plugin_stub_oscillograph::OSCILLOGRAPH;
+    use v_signal_nodes_plugin_std::{GAIN, MIXER, OSCILLOGRAPH, SINK, SOURCE};
 
     /// Adds a node of type `type_id` at `pos` (or the nearest free spot).
     pub(super) fn add(app: &mut VSignalNodesApp, type_id: &str, pos: egui::Pos2) -> NodeId {
@@ -688,9 +695,9 @@ mod tests {
         let mut app = VSignalNodesApp::default();
         let gain = add(&mut app, GAIN, egui::Pos2::ZERO);
 
-        assert!(!app.set_param(gain, 0, ParamValue::Number(100.0)));
+        assert!(!app.set_param(gain, 0, ParamValue::Number(1000.0)));
         assert!(!app.set_param(gain, 0, ParamValue::Toggle(true)));
-        assert!(!app.set_param(gain, 1, ParamValue::Number(0.5)));
+        assert!(!app.set_param(gain, 3, ParamValue::Number(0.5)));
         assert_eq!(
             app.graph.node(gain).unwrap().param("gain"),
             Some(ParamValue::Number(1.0))
@@ -701,22 +708,41 @@ mod tests {
     }
 
     #[test]
-    fn advanced_windows_open_close_and_go_with_their_node() {
+    fn windows_open_close_and_go_with_their_node() {
+        use NodeWindow::{AdvancedParams, Preview, Separate};
         let mut app = VSignalNodesApp::default();
-        let first = add(&mut app, MIXER, egui::Pos2::ZERO);
-        let second = add(&mut app, MIXER, egui::pos2(300.0, 0.0));
+        let first = add(&mut app, OSCILLOGRAPH, egui::Pos2::ZERO);
+        let second = add(&mut app, OSCILLOGRAPH, egui::pos2(300.0, 0.0));
 
-        app.toggle_advanced_window(first);
-        app.toggle_advanced_window(second);
-        assert_eq!(app.advanced_windows, [first, second]);
+        app.toggle_window(first, AdvancedParams);
+        app.toggle_window(first, Preview(0));
+        app.toggle_window(first, Separate(0));
+        app.toggle_window(second, Separate(0));
+        assert_eq!(
+            app.open_windows,
+            [
+                (first, AdvancedParams),
+                (first, Preview(0)),
+                (first, Separate(0)),
+                (second, Separate(0))
+            ]
+        );
 
-        app.toggle_advanced_window(first);
-        assert_eq!(app.advanced_windows, [second]);
+        app.toggle_window(first, AdvancedParams);
+        app.toggle_window(first, Preview(0));
+        assert_eq!(
+            app.open_windows,
+            [(first, Separate(0)), (second, Separate(0))]
+        );
 
-        app.remove_node(second);
-        assert!(app.advanced_windows.is_empty());
-        app.toggle_advanced_window(second);
-        assert!(app.advanced_windows.is_empty(), "the node is gone");
+        app.remove_node(first);
+        assert_eq!(app.open_windows, [(second, Separate(0))]);
+        app.toggle_window(first, Separate(0));
+        assert_eq!(
+            app.open_windows,
+            [(second, Separate(0))],
+            "the node is gone"
+        );
     }
 
     #[test]
@@ -887,7 +913,7 @@ mod tests {
             .map(|kind| kind.spec().type_id.as_str())
             .collect();
 
-        assert_eq!(type_ids, [SOURCE, GAIN, MIXER, OSCILLOGRAPH, SINK]);
+        assert_eq!(type_ids, [SOURCE, GAIN, MIXER, SINK, OSCILLOGRAPH]);
     }
 
     #[test]

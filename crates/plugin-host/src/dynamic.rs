@@ -198,6 +198,8 @@ impl NodeProcessor for DynamicProcessor {
             params: FfiSlice::new(&self.params),
             inputs: FfiSlice::new(inputs),
             outputs: FfiSlice::new(outputs),
+            plots: FfiSlice::new(io.raw_plots()),
+            position: io.position(),
         };
         // SAFETY: `ctx` is live, and the buffers come from a `ProcessIo`, which
         // already guarantees what `ProcessIo::from_raw` needs on the plugin side.

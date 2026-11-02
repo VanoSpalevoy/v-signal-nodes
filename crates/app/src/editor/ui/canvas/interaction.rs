@@ -6,7 +6,7 @@
 
 use eframe::egui;
 
-use super::{Hovered, View, advanced_button_rect, centered_on, delete_button_rect, socket_rect};
+use super::{Hovered, View, centered_on, delete_button_rect, socket_rect, window_button_rect};
 use crate::editor::{NodeKind, SocketRef, Text, VSignalNodesApp};
 use v_signal_nodes_core::NodeId;
 
@@ -121,8 +121,8 @@ fn drag_node(
 
 /// Registers the interactive areas of every node and applies this frame's clicks
 /// and drags: moving, raising, selecting a source, connecting, disconnecting,
-/// deleting and opening the advanced parameters window. Returns what the pointer is
-/// over, for hover feedback.
+/// deleting and opening the node's windows. Returns what the pointer is over, for
+/// hover feedback.
 ///
 /// Deleting and raising change the node list, so they are applied after the loop
 /// (at most one of each per frame).
@@ -168,15 +168,21 @@ pub(super) fn handle_node_interactions(
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(app.language.text(Text::DeleteNode));
-        let advanced = node.has_advanced_params().then(|| {
-            ui.interact(
-                view.rect(advanced_button_rect(&node)),
-                ui.scope_id().with(("canvas_node_advanced", node_id)),
-                egui::Sense::click(),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(app.language.text(Text::AdvancedParams))
-        });
+        let windows: Vec<_> = node
+            .windows()
+            .enumerate()
+            .map(|(slot, window)| {
+                let response = ui
+                    .interact(
+                        view.rect(window_button_rect(&node, slot)),
+                        ui.scope_id().with(("canvas_node_window", node_id, window)),
+                        egui::Sense::click(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(node.window_hint(window, app.language));
+                (window, response)
+            })
+            .collect();
 
         drag_node(app, ui, node_id, &body, view, viewport);
         if body.clicked() || body.drag_started() {
@@ -189,12 +195,12 @@ pub(super) fn handle_node_interactions(
             deleted_node_id = Some(node_id);
             continue;
         }
-        if let Some(advanced) = advanced {
-            if advanced.hovered() {
-                hovered.advanced_button = Some(node_id);
+        for (window, response) in windows {
+            if response.hovered() {
+                hovered.window_button = Some((node_id, window));
             }
-            if advanced.clicked_by(egui::PointerButton::Primary) {
-                app.toggle_advanced_window(node_id);
+            if response.clicked_by(egui::PointerButton::Primary) {
+                app.toggle_window(node_id, window);
             }
         }
 

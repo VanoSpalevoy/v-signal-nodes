@@ -7,12 +7,12 @@ use eframe::egui;
 use std::collections::HashMap;
 
 use super::{
-    CONNECTION_MIN_HANDLE, HEADER_HEIGHT, Hovered, View, advanced_button_rect, controls_hidden,
-    delete_button_rect, drop_rect,
+    CONNECTION_MIN_HANDLE, HEADER_HEIGHT, Hovered, View, controls_hidden, delete_button_rect,
+    drop_rect, window_button_rect,
 };
 use crate::editor::ui::routing::{self, Route};
 use crate::editor::ui::{
-    ACCENT, CONTROL_HOVER, DANGER, NodeKind, PANEL_BG, TEXT, TEXT_DIM, node_color,
+    ACCENT, CONTROL_HOVER, DANGER, NodeKind, NodeWindow, PANEL_BG, TEXT, TEXT_DIM, node_color,
 };
 use crate::editor::{Language, NodeWidget, SocketRef, VSignalNodesApp};
 use v_signal_nodes_core::{NodeId, SocketDirection};
@@ -31,6 +31,30 @@ const DELETE_CROSS_HALF: f32 = 3.5;
 const ADVANCED_DOT_SPACING: f32 = 4.5;
 /// Radius of those dots.
 const ADVANCED_DOT_RADIUS: f32 = 1.3;
+/// The wave of the drawn plot window button: points as parts of half the button's size.
+const PLOT_ICON: [(f32, f32); 6] = [
+    (-1.0, 0.0),
+    (-0.6, -0.7),
+    (-0.2, 0.0),
+    (0.2, 0.7),
+    (0.6, 0.0),
+    (1.0, -0.7),
+];
+/// Half the size of that wave and of [`SEPARATE_ICON`].
+const PLOT_ICON_HALF: f32 = 6.0;
+/// The drawn separate window button, an arrow out of a frame: lines of points, as parts
+/// of half the button's size.
+const SEPARATE_ICON: [&[(f32, f32)]; 3] = [
+    &[
+        (0.0, -0.8),
+        (-0.9, -0.8),
+        (-0.9, 0.9),
+        (0.8, 0.9),
+        (0.8, 0.0),
+    ],
+    &[(-0.2, 0.2), (0.9, -0.9)],
+    &[(0.2, -0.9), (0.9, -0.9), (0.9, -0.2)],
+];
 /// Radius of a socket dot.
 const SOCKET_RADIUS: f32 = 5.0;
 /// Extra radius of a hovered socket dot.
@@ -307,7 +331,7 @@ fn paint_grid(painter: &egui::Painter, view: View, viewport: egui::Rect) {
 
 /// Draws every node in order: body (panel color), header tinted with
 /// the kind color, kind-colored outline, title (`Kind #id`), sockets with their
-/// labels, the advanced parameters button and the delete cross, with hover and
+/// labels, the window buttons and the delete cross, with hover and
 /// pending-source highlights. Parameters are controls drawn on top later
 /// (`controls`), or plain text where those are hidden. All text is resolved in the
 /// app's language and all sizes follow the zoom.
@@ -336,40 +360,61 @@ fn paint_nodes(app: &VSignalNodesApp, painter: &egui::Painter, view: View, hover
             }
         }
         paint_sockets(app, &node, painter, view, hovered);
-        if node.has_advanced_params() {
-            paint_advanced_button(
+        for (slot, window) in node.windows().enumerate() {
+            let entry = (node.id, window);
+            paint_window_button(
                 painter,
                 view,
-                &node,
-                hovered.advanced_button == Some(node.id),
-                app.advanced_windows.contains(&node.id),
+                window_button_rect(&node, slot),
+                window,
+                hovered.window_button == Some(entry),
+                app.open_windows.contains(&entry),
             );
         }
         paint_delete_button(painter, view, &node, hovered.delete_button == Some(node.id));
     }
 }
 
-/// Draws the advanced parameters button as three dots (drawn for the same reason as
-/// the delete cross, see [`paint_delete_button`]). Dim at rest, accent-colored while
-/// its window is open; a lit square behind them when hovered.
-fn paint_advanced_button(
+/// Draws a window's button at `rect` (canvas coordinates): three dots for the advanced
+/// parameters, a wave for a preview, an arrow out of a frame for a separate window
+/// (drawn for the same reason as the delete cross, see [`paint_delete_button`]). Dim at
+/// rest, accent-colored while the window is open; a lit square behind them when hovered.
+fn paint_window_button(
     painter: &egui::Painter,
     view: View,
-    node: &NodeWidget,
+    rect: egui::Rect,
+    window: NodeWindow,
     hovered: bool,
     open: bool,
 ) {
-    let rect = view.rect(advanced_button_rect(node));
+    let rect = view.rect(rect);
     if hovered {
         painter.rect_filled(rect, view.len(4.0), CONTROL_HOVER);
     }
     let color = if open { ACCENT } else { TEXT_DIM };
-    for step in [-1.0, 0.0, 1.0] {
-        painter.circle_filled(
-            rect.center() + egui::vec2(view.len(ADVANCED_DOT_SPACING) * step, 0.0),
-            view.len(ADVANCED_DOT_RADIUS),
-            color,
-        );
+    let half = view.len(PLOT_ICON_HALF);
+    let line = |points: &[(f32, f32)]| {
+        let points = points
+            .iter()
+            .map(|&(x, y)| rect.center() + egui::vec2(x, y) * half)
+            .collect();
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(view.len(1.5), color),
+        ));
+    };
+    match window {
+        NodeWindow::AdvancedParams => {
+            for step in [-1.0, 0.0, 1.0] {
+                painter.circle_filled(
+                    rect.center() + egui::vec2(view.len(ADVANCED_DOT_SPACING) * step, 0.0),
+                    view.len(ADVANCED_DOT_RADIUS),
+                    color,
+                );
+            }
+        }
+        NodeWindow::Preview(_) => line(&PLOT_ICON),
+        NodeWindow::Separate(_) => SEPARATE_ICON.into_iter().for_each(line),
     }
 }
 

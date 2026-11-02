@@ -34,9 +34,9 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::{
-    NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, ParamKind, ParamSpec, ParamValue,
-    Plugin, PluginError, ProcessIo, RawBuffer, Registrar, Rgb, SignalRate, SocketDirection,
-    TextKey, Translation, slice_from_raw,
+    AxisUnit, NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, ParamKind, ParamSpec,
+    ParamValue, Plugin, PluginError, ProcessIo, RawBuffer, RawPlotSink, Registrar, Rgb, SignalRate,
+    SocketDirection, TextKey, Translation, WindowContent, WindowSpec, slice_from_raw,
 };
 
 /// Name of the exported [`VersionFn`].
@@ -139,15 +139,31 @@ pub struct FfiParam {
     pub advanced: u8,
 }
 
+/// A window of a [`FfiNodeSpec`]. Which fields matter depends on `kind`: plot —
+/// `x_unit`, `y_unit`.
+#[repr(C)]
+pub struct FfiWindow {
+    /// Stable id within the node type.
+    pub id: FfiStr,
+    /// Label (English).
+    pub name: FfiStr,
+    /// [`WindowContent`] code.
+    pub kind: u8,
+    /// [`AxisUnit`] code of the horizontal axis.
+    pub x_unit: u8,
+    /// [`AxisUnit`] code of the vertical axis.
+    pub y_unit: u8,
+}
+
 /// A [`TextKey`]. Which fields matter depends on `kind`: input/output — `index`;
-/// parameter — `param`; option — `param` and `index`.
+/// parameter, window — `param`; option — `param` and `index`.
 #[repr(C)]
 pub struct FfiTextKey {
     /// [`TextKey`] variant code.
     pub kind: u8,
     /// Socket or option index.
     pub index: usize,
-    /// Parameter id.
+    /// Parameter or window id.
     pub param: FfiStr,
 }
 
@@ -181,6 +197,8 @@ pub struct FfiNodeSpec {
     pub outputs: FfiSlice<FfiSocket>,
     /// Parameters, in order.
     pub params: FfiSlice<FfiParam>,
+    /// Windows, in order.
+    pub windows: FfiSlice<FfiWindow>,
     /// Translations of the English strings above.
     pub translations: FfiSlice<FfiTranslation>,
 }
@@ -260,6 +278,10 @@ pub struct FfiProcessArgs {
     pub inputs: FfiSlice<RawBuffer>,
     /// Output buffers, in socket order.
     pub outputs: FfiSlice<RawBuffer>,
+    /// Plot sinks: one per window of the spec, or none.
+    pub plots: FfiSlice<RawPlotSink>,
+    /// Frames of the run before this block ([`ProcessIo::position`]).
+    pub position: u64,
 }
 
 /// Result of a processor call; on failure `message` holds the error.
@@ -326,6 +348,7 @@ fn node_kind_code(kind: NodeKind) -> u8 {
         NodeKind::Generator => 0,
         NodeKind::Processor => 1,
         NodeKind::Output => 2,
+        NodeKind::Instrument => 3,
     }
 }
 
@@ -334,9 +357,27 @@ fn node_kind_from(code: u8) -> Result<NodeKind, PluginError> {
         0 => NodeKind::Generator,
         1 => NodeKind::Processor,
         2 => NodeKind::Output,
+        3 => NodeKind::Instrument,
         _ => return Err(bad_code("node kind", code)),
     })
 }
+
+fn axis_unit_code(unit: AxisUnit) -> u8 {
+    match unit {
+        AxisUnit::Seconds => 0,
+        AxisUnit::Volts => 1,
+    }
+}
+
+fn axis_unit_from(code: u8) -> Result<AxisUnit, PluginError> {
+    Ok(match code {
+        0 => AxisUnit::Seconds,
+        1 => AxisUnit::Volts,
+        _ => return Err(bad_code("axis unit", code)),
+    })
+}
+
+const WINDOW_PLOT: u8 = 0;
 
 fn rate_code(rate: SignalRate) -> u8 {
     match rate {
@@ -374,8 +415,9 @@ const TEXT_INPUT: u8 = 1;
 const TEXT_OUTPUT: u8 = 2;
 const TEXT_PARAM: u8 = 3;
 const TEXT_OPTION: u8 = 4;
+const TEXT_WINDOW: u8 = 5;
 
-/// The C layout of `key`, borrowing its parameter id.
+/// The C layout of `key`, borrowing its parameter or window id.
 fn text_key_ffi(key: &TextKey) -> FfiTextKey {
     let (kind, index, param) = match key {
         TextKey::Name => (TEXT_NAME, 0, ""),
@@ -383,6 +425,7 @@ fn text_key_ffi(key: &TextKey) -> FfiTextKey {
         TextKey::Output(index) => (TEXT_OUTPUT, *index, ""),
         TextKey::Param(id) => (TEXT_PARAM, 0, id.as_str()),
         TextKey::Option(id, index) => (TEXT_OPTION, *index, id.as_str()),
+        TextKey::Window(id) => (TEXT_WINDOW, 0, id.as_str()),
     };
     FfiTextKey {
         kind,
@@ -403,6 +446,7 @@ unsafe fn text_key_from(key: &FfiTextKey) -> Result<TextKey, PluginError> {
         TEXT_OUTPUT => TextKey::Output(key.index),
         TEXT_PARAM => TextKey::Param(param()?),
         TEXT_OPTION => TextKey::Option(param()?, key.index),
+        TEXT_WINDOW => TextKey::Window(param()?),
         code => return Err(bad_code("text key", code)),
     })
 }
@@ -469,6 +513,25 @@ pub unsafe fn read_spec(spec: &FfiNodeSpec) -> Result<NodeSpec, PluginError> {
                 })
             })
             .collect::<Result<_, PluginError>>()?;
+        let windows = spec
+            .windows
+            .as_slice()
+            .iter()
+            .map(|window| {
+                let content = match window.kind {
+                    WINDOW_PLOT => WindowContent::Plot {
+                        x: axis_unit_from(window.x_unit)?,
+                        y: axis_unit_from(window.y_unit)?,
+                    },
+                    code => return Err(bad_code("window kind", code)),
+                };
+                Ok(WindowSpec {
+                    id: window.id.read()?,
+                    name: window.name.read()?,
+                    content,
+                })
+            })
+            .collect::<Result<_, PluginError>>()?;
         let translations = spec
             .translations
             .as_slice()
@@ -490,6 +553,7 @@ pub unsafe fn read_spec(spec: &FfiNodeSpec) -> Result<NodeSpec, PluginError> {
             inputs: sockets(spec.inputs, SocketDirection::Input)?,
             outputs: sockets(spec.outputs, SocketDirection::Output)?,
             params,
+            windows,
             translations,
         })
     }
@@ -553,6 +617,7 @@ struct ExportedNode {
     /// Option labels per parameter (empty for non-choice parameters).
     _options: Vec<Vec<FfiStr>>,
     params: Vec<FfiParam>,
+    windows: Vec<FfiWindow>,
     translations: Vec<FfiTranslation>,
     provider: Box<dyn NodeProvider>,
 }
@@ -604,6 +669,24 @@ impl ExportedNode {
                 }
             })
             .collect();
+        let windows = spec
+            .windows
+            .iter()
+            .map(|window| {
+                let (kind, x_unit, y_unit) = match window.content {
+                    WindowContent::Plot { x, y } => {
+                        (WINDOW_PLOT, axis_unit_code(x), axis_unit_code(y))
+                    }
+                };
+                FfiWindow {
+                    id: FfiStr::of(&window.id),
+                    name: FfiStr::of(&window.name),
+                    kind,
+                    x_unit,
+                    y_unit,
+                }
+            })
+            .collect();
         let translations = spec
             .translations
             .iter()
@@ -619,6 +702,7 @@ impl ExportedNode {
             outputs: sockets(&spec.outputs),
             _options: options,
             params,
+            windows,
             translations,
             spec,
             provider,
@@ -636,6 +720,7 @@ impl ExportedNode {
             inputs: FfiSlice::new(&self.inputs),
             outputs: FfiSlice::new(&self.outputs),
             params: FfiSlice::new(&self.params),
+            windows: FfiSlice::new(&self.windows),
             translations: FfiSlice::new(&self.translations),
         }
     }
@@ -775,6 +860,8 @@ unsafe extern "C" fn processor_process(ctx: *mut c_void, args: FfiProcessArgs) -
                 args.inputs.as_slice(),
                 args.outputs.as_slice(),
             )
+            .with_plots(args.plots.as_slice())
+            .with_position(args.position)
         };
         state.processor.process(&mut io)
     }));

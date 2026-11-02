@@ -10,6 +10,7 @@
 //! |----------------|--------------------------------------------------------------------|
 //! | [`engine`]     | [`Engine`]: runs a plan block by block, one by one or in parallel  |
 //! | [`realtime`]   | an engine on a real-time thread, driven by messages                |
+//! | [`plots`]      | frames for nodes' plot windows, from any thread to the display     |
 //!
 //! Two executors of the same plan share the engine:
 //! - **real time**: [`realtime::Renderer::render`] on the device's thread, blocks of
@@ -25,7 +26,9 @@
 
 pub mod engine;
 pub mod error;
+pub mod plots;
 pub mod realtime;
 
 pub use engine::{Engine, processors_for};
 pub use error::RuntimeError;
+pub use v_signal_nodes_plugin_api::NodeProcessor;

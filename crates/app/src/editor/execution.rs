@@ -11,6 +11,8 @@
 //!   graph becomes a new plan, sent through a `Controller`; nodes that stay keep
 //!   their processors. A graph that stops compiling silences the output until it
 //!   compiles again.
+//!   A changed parameter is no new plan: it goes straight to the running processors
+//!   ([`send_param`](Execution::send_param)), so moving a control is cheap.
 //! - **One pass** ([`Command::RunAsync`](super::commands::Command)): a background
 //!   thread runs the plan once over [`ONE_PASS_FRAMES`] in big blocks, branches in
 //!   parallel, and sends back a summary. There is no file or display output yet, so
@@ -23,7 +25,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use v_signal_nodes_core::{CompileError, Plan, compile};
+use v_signal_nodes_core::{CompileError, NodeId, ParamValue, Plan, compile};
 use v_signal_nodes_device::{DeviceError, Output, OutputStream};
 use v_signal_nodes_runtime::realtime::{self, Controller};
 use v_signal_nodes_runtime::{Engine, RuntimeError, processors_for};
@@ -111,6 +113,16 @@ impl Execution {
     pub(super) fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
     }
+
+    /// Passes a changed parameter on to the running device, which takes it from its
+    /// next block on. If its queue is full, a new plan carries the value instead.
+    pub(super) fn send_param(&mut self, node: NodeId, index: usize, value: ParamValue) {
+        if let Some(run) = &mut self.realtime
+            && !run.controller.set_param(node, index, value)
+        {
+            self.plan_outdated = true;
+        }
+    }
 }
 
 impl VSignalNodesApp {
@@ -148,8 +160,8 @@ impl VSignalNodesApp {
 
     /// Starts real-time processing on the default output device, or stops it.
     pub(super) fn toggle_realtime(&mut self) {
-        if self.execution.realtime.take().is_some() {
-            self.execution.failure = None;
+        if self.execution.is_running_realtime() {
+            self.stop_realtime();
             return;
         }
         self.execution.failure = match self.start_realtime() {
@@ -159,6 +171,12 @@ impl VSignalNodesApp {
             }
             Err(failure) => Some(failure),
         };
+    }
+
+    /// Stops real-time processing, if it runs.
+    pub(super) fn stop_realtime(&mut self) {
+        self.execution.realtime = None;
+        self.execution.failure = None;
     }
 
     /// Opens the device and runs the graph on it. The device starts silent and gets
@@ -407,6 +425,49 @@ mod tests {
 
         app.execute(Command::RunRealtime);
         assert!(!app.execution.is_running_realtime());
+    }
+
+    /// A changed parameter goes straight to the running device: no recompiling, no new
+    /// plan. The gain has no input, so it's silent. Ignored like the test above.
+    #[test]
+    #[ignore = "needs an output device"]
+    fn a_changed_parameter_needs_no_new_plan() {
+        let mut app = VSignalNodesApp::default();
+        let ctx = egui::Context::default();
+        let gain = app
+            .add_node_at(app.kind_of(GAIN).unwrap(), egui::Pos2::ZERO)
+            .unwrap();
+        let sink = app
+            .add_node_at(app.kind_of(SINK).unwrap(), egui::pos2(300.0, 0.0))
+            .unwrap();
+        assert!(app.connect(OutputRef::new(gain, 0), InputRef::new(sink, 0)));
+        app.refresh_compile_status();
+        app.execute(Command::RunRealtime);
+        app.update_execution(&ctx);
+        assert!(app.execution.is_running_realtime());
+        assert!(!app.execution.plan_outdated);
+
+        assert!(app.set_param(gain, 0, ParamValue::Number(0.5)));
+        assert!(!app.execution.plan_outdated);
+        app.update_execution(&ctx);
+        assert!(!app.execution.plan_outdated);
+        assert_eq!(app.execution.failure(), None);
+    }
+
+    #[test]
+    fn a_plan_compiled_after_a_change_has_the_new_value() {
+        let mut app = runnable();
+        let gain = app
+            .nodes()
+            .find(|node| node.node.type_id() == GAIN)
+            .unwrap()
+            .id;
+
+        assert!(app.set_param(gain, 0, ParamValue::Number(0.5)));
+
+        let plan = app.compile_graph().unwrap();
+        let step = plan.steps().iter().find(|step| step.node == gain).unwrap();
+        assert_eq!(step.params, [ParamValue::Number(0.5)]);
     }
 
     #[test]

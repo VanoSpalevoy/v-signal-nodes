@@ -135,6 +135,8 @@ pub struct FfiParam {
     pub default: f32,
     /// Choice options (English).
     pub options: FfiSlice<FfiStr>,
+    /// Non-zero if the parameter is [`ParamSpec::advanced`].
+    pub advanced: u8,
 }
 
 /// A [`TextKey`]. Which fields matter depends on `kind`: input/output — `index`;
@@ -463,6 +465,7 @@ pub unsafe fn read_spec(spec: &FfiNodeSpec) -> Result<NodeSpec, PluginError> {
                     id: param.id.read()?,
                     name: param.name.read()?,
                     kind,
+                    advanced: param.advanced != 0,
                 })
             })
             .collect::<Result<_, PluginError>>()?;
@@ -597,6 +600,7 @@ impl ExportedNode {
                     max,
                     default,
                     options: FfiSlice::new(options),
+                    advanced: u8::from(param.advanced),
                 }
             })
             .collect();

@@ -7,7 +7,8 @@
 //! | `std.mixer`  | Processor | Left, Right, Side | Mixed (stereo)   | Mode, Gain, Pan   |
 //! | `std.sink`   | Output    | Audio (stereo)    | —                | —                 |
 //!
-//! All sockets are audio rate and mono unless marked stereo. Every label is
+//! The mixer's Mode and Pan are advanced parameters (`ParamSpec::advanced`). All
+//! sockets are audio rate and mono unless marked stereo. Every label is
 //! English in the spec, with Russian translations next to it
 //! (`NodeSpec::translate`), so the editor needs no strings of its own for these
 //! nodes. Parameters are declared once as key constants, used both for the spec
@@ -200,9 +201,9 @@ impl NodeProvider for Mixer {
             .input(NodeSocket::signal_in("Right"))
             .input(NodeSocket::signal_in("Side"))
             .output(NodeSocket::signal_out("Mixed").with_channels(2))
-            .param(MODE.spec("Mode", ["mono", "stereo"], 1))
+            .param(MODE.spec("Mode", ["mono", "stereo"], 1).advanced())
             .param(GAIN_FACTOR.spec("Gain", 0.0, 2.0, 1.0))
-            .param(PAN.spec("Pan", ["left", "center", "right"], 1))
+            .param(PAN.spec("Pan", ["left", "center", "right"], 1).advanced())
             .translate(
                 "ru",
                 [

@@ -35,7 +35,7 @@ const MAX_NODE_COUNT: usize = 512;
 /// no cycles, ids of removed nodes never reused) are kept by `core::Graph`.
 /// Invariants the editor itself must keep on every add/remove path:
 /// - `positions` and `z_order` hold exactly the nodes of `graph`, each once;
-/// - `pending_source` and `drag` only refer to nodes that exist;
+/// - `pending_source`, `drag` and `advanced_windows` only refer to nodes that exist;
 /// - `node_limit_reached` is set only by a failed [`add_node_at`](Self::add_node_at)
 ///   and cleared by the next successful add or any deletion;
 /// - nodes never overlap, except the dragged node while the drag lasts: adds go
@@ -72,6 +72,8 @@ pub struct VSignalNodesApp {
     scale: f32,
     /// The node being dragged on the canvas, if any.
     drag: Option<NodeDrag>,
+    /// The nodes whose advanced parameters windows are open, each once, oldest first.
+    advanced_windows: Vec<NodeId>,
     /// Connection routes, derived from the graph and the layout and brought up to
     /// date by the canvas every frame. Never saved.
     routes: RouteCache,
@@ -113,6 +115,7 @@ impl Default for VSignalNodesApp {
             language: Language::English,
             scale: 1.0,
             drag: None,
+            advanced_windows: Vec::new(),
             routes: RouteCache::default(),
             plugins,
             palette,
@@ -258,6 +261,7 @@ impl VSignalNodesApp {
         self.positions.remove(&node_id);
         self.z_order.retain(|&id| id != node_id);
         self.node_limit_reached = false;
+        self.advanced_windows.retain(|&id| id != node_id);
         if self.dragged_node() == Some(node_id) {
             self.drag = None;
         }
@@ -266,6 +270,34 @@ impl VSignalNodesApp {
             .is_some_and(|source| source.node == node_id)
         {
             self.pending_source = None;
+        }
+    }
+
+    /// Sets parameter `index` (spec order) of a node, in the graph and in whatever is
+    /// running it, without recompiling anything. A value the spec doesn't accept
+    /// changes nothing. Returns whether the value was taken.
+    fn set_param(&mut self, node_id: NodeId, index: usize, value: ParamValue) -> bool {
+        let Some(param) = self
+            .graph
+            .node(node_id)
+            .and_then(|node| node.spec().params.get(index))
+            .map(|param| param.id.clone())
+        else {
+            return false;
+        };
+        if self.graph.set_param(node_id, &param, value).is_err() {
+            return false;
+        }
+        self.execution.send_param(node_id, index, value);
+        true
+    }
+
+    /// Opens the window with the advanced parameters of a node, or closes it.
+    fn toggle_advanced_window(&mut self, node_id: NodeId) {
+        if let Some(index) = self.advanced_windows.iter().position(|&id| id == node_id) {
+            self.advanced_windows.remove(index);
+        } else if self.graph.contains(node_id) {
+            self.advanced_windows.push(node_id);
         }
     }
 
@@ -461,7 +493,7 @@ mod tests {
     use v_signal_nodes_plugin_stub_oscillograph::OSCILLOGRAPH;
 
     /// Adds a node of type `type_id` at `pos` (or the nearest free spot).
-    fn add(app: &mut VSignalNodesApp, type_id: &str, pos: egui::Pos2) -> NodeId {
+    pub(super) fn add(app: &mut VSignalNodesApp, type_id: &str, pos: egui::Pos2) -> NodeId {
         app.add_node_at(app.kind_of(type_id).unwrap(), pos).unwrap()
     }
 
@@ -634,6 +666,57 @@ mod tests {
         assert_eq!(new.index(), ids[1].index());
         assert_ne!(new, ids[1]);
         assert!(app.node(ids[1]).is_none());
+    }
+
+    #[test]
+    fn parameters_change_without_a_new_revision() {
+        let mut app = VSignalNodesApp::default();
+        let gain = add(&mut app, GAIN, egui::Pos2::ZERO);
+        let revision = app.graph.revision();
+
+        assert!(app.set_param(gain, 0, ParamValue::Number(0.5)));
+
+        assert_eq!(
+            app.graph.node(gain).unwrap().param("gain"),
+            Some(ParamValue::Number(0.5))
+        );
+        assert_eq!(app.graph.revision(), revision);
+    }
+
+    #[test]
+    fn parameter_values_are_checked() {
+        let mut app = VSignalNodesApp::default();
+        let gain = add(&mut app, GAIN, egui::Pos2::ZERO);
+
+        assert!(!app.set_param(gain, 0, ParamValue::Number(100.0)));
+        assert!(!app.set_param(gain, 0, ParamValue::Toggle(true)));
+        assert!(!app.set_param(gain, 1, ParamValue::Number(0.5)));
+        assert_eq!(
+            app.graph.node(gain).unwrap().param("gain"),
+            Some(ParamValue::Number(1.0))
+        );
+
+        app.remove_node(gain);
+        assert!(!app.set_param(gain, 0, ParamValue::Number(0.5)));
+    }
+
+    #[test]
+    fn advanced_windows_open_close_and_go_with_their_node() {
+        let mut app = VSignalNodesApp::default();
+        let first = add(&mut app, MIXER, egui::Pos2::ZERO);
+        let second = add(&mut app, MIXER, egui::pos2(300.0, 0.0));
+
+        app.toggle_advanced_window(first);
+        app.toggle_advanced_window(second);
+        assert_eq!(app.advanced_windows, [first, second]);
+
+        app.toggle_advanced_window(first);
+        assert_eq!(app.advanced_windows, [second]);
+
+        app.remove_node(second);
+        assert!(app.advanced_windows.is_empty());
+        app.toggle_advanced_window(second);
+        assert!(app.advanced_windows.is_empty(), "the node is gone");
     }
 
     #[test]

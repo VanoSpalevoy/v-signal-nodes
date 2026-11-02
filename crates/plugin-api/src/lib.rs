@@ -90,7 +90,7 @@ pub use v_signal_nodes_core::{
 /// so they always match).
 ///
 /// Bump it on any change to the traits or to the [`ffi`] types.
-pub const API_VERSION: u32 = 3;
+pub const API_VERSION: u32 = 4;
 
 /// An error reported by a plugin.
 #[derive(Clone, Debug, PartialEq, Eq)]

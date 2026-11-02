@@ -24,16 +24,17 @@
 //!    │ Gain #3                  ✕   │  │ CONTENT_TOP: tinted header (title, delete)
 //!    │                              │ ─┴─
 //!    ● Audio in         Audio out   ●    socket row 0, ROW_HEIGHT tall
-//!    │          Gain: 1.0           │    parameter row 0
+//!    │        [ Gain: 1.0 ]         │    parameter row 0
 //!    └──────────────────────────────┘
 //!    ◄───────── NODE_WIDTH ─────────►
 //! ```
 //!
 //! Socket rows come first: row `i` holds input `i` on the left edge and output `i`
-//! on the right edge. Parameter rows follow below, centered, one per parameter, so
-//! parameter text never overlaps socket labels. The node is tall enough for all
-//! rows, but at least [`MIN_NODE_HEIGHT`]; the size depends only on the spec
-//! ([`node_size`]).
+//! on the right edge. Parameter rows follow below, centered, one per parameter that
+//! isn't advanced, so parameters never overlap socket labels. Advanced ones have no
+//! row; a node having any gets a button in its header ([`params`](super::params)).
+//! The node is tall enough for all rows, but at least [`MIN_NODE_HEIGHT`]; the size
+//! depends only on the spec ([`node_size`]).
 
 use std::sync::Arc;
 
@@ -52,6 +53,10 @@ const MIN_NODE_HEIGHT: f32 = 90.0;
 const ROW_HEIGHT: f32 = 22.0;
 /// Height of the header above the first row.
 const CONTENT_TOP: f32 = 38.0;
+/// Distance of a parameter's control from the node's left and right edges.
+const PARAM_INSET: f32 = 8.0;
+/// Height of a parameter's control: a row, less the free height between two controls.
+pub(super) const PARAM_HEIGHT: f32 = ROW_HEIGHT - 2.0;
 
 /// Type of a node: the spec of a node type from a loaded plugin. Decides its
 /// sockets, parameters and color. Cheap to clone: the spec is the plugin host's,
@@ -81,13 +86,20 @@ fn socket_rows(spec: &NodeSpec) -> usize {
     spec.inputs.len().max(spec.outputs.len())
 }
 
+/// The parameters of `spec` that are advanced, or those that aren't, as indices in
+/// spec order.
+fn params_by_advanced(spec: &NodeSpec, advanced: bool) -> impl Iterator<Item = usize> {
+    let params = spec.params.iter().enumerate();
+    params.filter_map(move |(index, param)| (param.advanced == advanced).then_some(index))
+}
+
 /// Size of a node of `spec`: [`NODE_WIDTH`] wide, tall enough for the socket rows
-/// plus one row per parameter.
+/// plus one row per parameter that isn't advanced.
 ///
 /// The single source of node size: the node itself, the drop preview and the
 /// canvas extent all use it.
 pub(in crate::editor) fn node_size(spec: &NodeSpec) -> egui::Vec2 {
-    let row_count = (socket_rows(spec) + spec.params.len()).max(1);
+    let row_count = (socket_rows(spec) + params_by_advanced(spec, false).count()).max(1);
     egui::vec2(
         NODE_WIDTH,
         MIN_NODE_HEIGHT.max(CONTENT_TOP + ROW_HEIGHT * row_count as f32 + 8.0),
@@ -172,18 +184,40 @@ impl<'a> NodeWidget<'a> {
         self.text(TextKey::socket(socket.side(), socket.index()), language)
     }
 
-    /// Number of parameters, one row each.
-    pub(super) fn param_count(&self) -> usize {
-        self.node.params().len()
+    /// The parameters shown on the node, as indices in spec order; the `i`-th of them
+    /// is in parameter row `i`.
+    pub(super) fn inline_params(&self) -> impl Iterator<Item = usize> + 'a {
+        params_by_advanced(self.spec(), false)
+    }
+
+    /// The parameters shown in the node's window, as indices in spec order.
+    pub(super) fn advanced_params(&self) -> impl Iterator<Item = usize> + 'a {
+        params_by_advanced(self.spec(), true)
+    }
+
+    /// Whether the node has a window to open.
+    pub(super) fn has_advanced_params(&self) -> bool {
+        self.advanced_params().next().is_some()
+    }
+
+    /// Name of parameter `index` in `language`.
+    pub(super) fn param_name(&self, index: usize, language: Language) -> &'a str {
+        let id = self.spec().params[index].id.as_str();
+        self.text(TextKey::Param(id), language)
+    }
+
+    /// Option `option` of choice parameter `index` in `language`.
+    pub(super) fn option_label(&self, index: usize, option: usize, language: Language) -> &'a str {
+        let id = self.spec().params[index].id.as_str();
+        self.text(TextKey::Option(id, option), language)
     }
 
     /// `Name: value` of parameter `index` in `language`, for example "Gain: 1.0"
     /// or "Режим: стерео".
     pub(super) fn param_label(&self, index: usize, language: Language) -> String {
-        let id = self.spec().params[index].id.as_str();
-        let name = self.text(TextKey::Param(id), language);
+        let name = self.param_name(index, language);
         let value = match self.node.params()[index] {
-            ParamValue::Choice(option) => self.text(TextKey::Option(id, option), language),
+            ParamValue::Choice(option) => self.option_label(index, option, language),
             ParamValue::Number(value) => return format!("{name}: {value:.1}"),
             ParamValue::Toggle(on) => language.text(if on { Text::On } else { Text::Off }),
         };
@@ -226,13 +260,21 @@ impl<'a> NodeWidget<'a> {
         )
     }
 
-    /// Center of parameter `index`'s text in canvas coordinates: horizontally
-    /// centered, in the `index`-th row below the socket rows.
-    pub(super) fn param_pos(&self, index: usize) -> egui::Pos2 {
-        let row = socket_rows(self.spec()) + index;
+    /// Center of parameter row `row` in canvas coordinates: horizontally centered,
+    /// in the `row`-th row below the socket rows.
+    pub(super) fn param_pos(&self, row: usize) -> egui::Pos2 {
+        let row = socket_rows(self.spec()) + row;
         egui::pos2(
             self.pos.x + NODE_WIDTH * 0.5,
             self.pos.y + CONTENT_TOP + ROW_HEIGHT * (row as f32 + 0.5),
+        )
+    }
+
+    /// The area of the control in parameter row `row`, in canvas coordinates.
+    pub(super) fn param_rect(&self, row: usize) -> egui::Rect {
+        egui::Rect::from_center_size(
+            self.param_pos(row),
+            egui::vec2(NODE_WIDTH - PARAM_INSET * 2.0, PARAM_HEIGHT),
         )
     }
 }
@@ -250,7 +292,7 @@ pub(in crate::editor) fn std_kind(type_id: &str) -> NodeKind {
 mod tests {
     use super::*;
     use v_signal_nodes_core::{Graph, NodeSocket, ParamSpec};
-    use v_signal_nodes_plugin_std::{GAIN, MIXER};
+    use v_signal_nodes_plugin_std::{GAIN, MIXER, SOURCE};
 
     /// A graph holding one node of `spec`, and its id.
     fn one_node(spec: Arc<NodeSpec>) -> (Graph, NodeId) {
@@ -283,14 +325,43 @@ mod tests {
 
     #[test]
     fn params_sit_below_sockets_inside_node() {
-        let (graph, id) = one_node(std_spec(MIXER));
+        let (graph, id) = one_node(std_spec(SOURCE));
         let node = NodeWidget::new(id, graph.node(id).unwrap(), egui::Pos2::ZERO);
-        let last_socket = node.socket_pos(SocketDirection::Input, 2);
-        let first_param = node.param_pos(0);
-        let last_param = node.param_pos(2);
+        let last_socket = node.socket_pos(SocketDirection::Output, 0);
 
-        assert!(first_param.y >= last_socket.y + ROW_HEIGHT);
-        assert!(node.rect().contains(last_param));
+        assert!(node.param_pos(0).y >= last_socket.y + ROW_HEIGHT);
+        assert!(node.rect().contains_rect(node.param_rect(1)));
+        assert!(!node.param_rect(0).intersects(node.param_rect(1)));
+    }
+
+    #[test]
+    fn advanced_params_take_no_row() {
+        let spec = NodeSpec::new(
+            "test.node",
+            "Node",
+            v_signal_nodes_core::NodeKind::Generator,
+        )
+        .output(NodeSocket::signal_out("out"))
+        .param(ParamSpec::toggle("a", "A", true).advanced())
+        .param(ParamSpec::toggle("b", "B", true))
+        .param(ParamSpec::toggle("c", "C", true).advanced());
+        let everyday = NodeSpec::new(
+            "test.node",
+            "Node",
+            v_signal_nodes_core::NodeKind::Generator,
+        )
+        .output(NodeSocket::signal_out("out"))
+        .param(ParamSpec::toggle("b", "B", true));
+        let (graph, id) = one_node(Arc::new(spec));
+        let node = NodeWidget::new(id, graph.node(id).unwrap(), egui::Pos2::ZERO);
+
+        assert_eq!(node.inline_params().collect::<Vec<_>>(), [1]);
+        assert_eq!(node.advanced_params().collect::<Vec<_>>(), [0, 2]);
+        assert!(node.has_advanced_params());
+        assert_eq!(node.rect().size(), node_size(&everyday));
+        let (graph, id) = one_node(Arc::new(everyday));
+        let node = NodeWidget::new(id, graph.node(id).unwrap(), egui::Pos2::ZERO);
+        assert!(!node.has_advanced_params());
     }
 
     #[test]
@@ -332,7 +403,7 @@ mod tests {
             "in"
         );
         let labels = |language| {
-            (0..node.param_count())
+            node.inline_params()
                 .map(|index| node.param_label(index, language))
                 .collect::<Vec<_>>()
         };

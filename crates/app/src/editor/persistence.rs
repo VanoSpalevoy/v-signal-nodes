@@ -146,6 +146,7 @@ impl VSignalNodesApp {
         self.connection_refused = None;
         self.requested_node = None;
         self.drag = None;
+        self.advanced_windows.clear();
         self.routes = RouteCache::default();
         Ok(())
     }

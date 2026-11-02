@@ -41,6 +41,8 @@ pub(super) enum Command {
     ResetZoom,
     /// Starts or stops real-time processing on the output device.
     RunRealtime,
+    /// Stops real-time processing on the output device.
+    StopRealtime,
     /// Runs the graph once on background threads, independent branches in parallel.
     RunAsync,
 }
@@ -92,6 +94,7 @@ impl Command {
             Self::ZoomOut => Text::ZoomOut,
             Self::ResetZoom => Text::ResetZoom,
             Self::RunRealtime => Text::RunRealtime,
+            Self::StopRealtime => Text::StopRealtime,
             Self::RunAsync => Text::RunAsync,
         }
     }
@@ -122,6 +125,8 @@ impl Command {
             Self::ZoomOut => const { &[key(Modifiers::COMMAND, Key::Minus)] },
             Self::ResetZoom => const { &[key(Modifiers::COMMAND, Key::Num0)] },
             Self::RunRealtime => const { &[key(Modifiers::NONE, Key::Space)] },
+            // In no menu, so nothing would read a shortcut: Space is `RunRealtime`'s.
+            Self::StopRealtime => &[],
             Self::RunAsync => const { &[key(Modifiers::COMMAND, Key::Enter)] },
         }
     }
@@ -142,6 +147,7 @@ impl VSignalNodesApp {
             Command::RunRealtime => {
                 self.execution.is_running_realtime() || self.execution.compile_error().is_none()
             }
+            Command::StopRealtime => self.execution.is_running_realtime(),
             Command::RunAsync => {
                 !self.execution.is_running_one_pass() && self.execution.compile_error().is_none()
             }
@@ -162,6 +168,7 @@ impl VSignalNodesApp {
             Command::ZoomOut => self.set_scale(self.scale - SCALE_STEP),
             Command::ResetZoom => self.set_scale(1.0),
             Command::RunRealtime => self.toggle_realtime(),
+            Command::StopRealtime => self.stop_realtime(),
             Command::RunAsync => self.start_one_pass(),
         }
     }

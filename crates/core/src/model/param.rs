@@ -41,6 +41,9 @@ pub struct ParamSpec {
     /// Display name.
     pub name: String,
     pub kind: ParamKind,
+    /// Not everyday: an editor keeps it out of the way, in a separate window instead
+    /// of on the node. Set with [`advanced`](Self::advanced).
+    pub advanced: bool,
 }
 
 /// Current value of a parameter.
@@ -213,7 +216,15 @@ impl ParamSpec {
             id: id.into(),
             name: name.into(),
             kind,
+            advanced: false,
         }
+    }
+
+    /// This parameter, marked as [`advanced`](Self::advanced).
+    #[must_use]
+    pub fn advanced(mut self) -> Self {
+        self.advanced = true;
+        self
     }
 
     /// The value a new node starts with.
@@ -279,6 +290,13 @@ mod tests {
         let mode = ParamSpec::choice("mode", "Mode", ["a", "b"], 1);
         assert_eq!(mode.default_value(), ParamValue::Choice(1));
         assert!(!mode.accepts(ParamValue::Choice(2)));
+    }
+
+    #[test]
+    fn parameters_are_everyday_unless_marked() {
+        let gain = NumberParam("gain").spec("Gain", 0.0, 2.0, 1.0);
+        assert!(!gain.advanced);
+        assert!(gain.advanced().advanced);
     }
 
     #[test]

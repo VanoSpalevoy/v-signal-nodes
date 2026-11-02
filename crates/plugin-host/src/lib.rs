@@ -329,6 +329,12 @@ mod tests {
 
         assert!(linked.specs().eq(through_ffi.specs()));
         assert_eq!(linked.plugins(), through_ffi.plugins());
+        assert!(
+            through_ffi
+                .specs()
+                .any(|spec| spec.params.iter().any(|param| param.advanced)),
+            "the comparison covers advanced parameters"
+        );
     }
 
     #[test]

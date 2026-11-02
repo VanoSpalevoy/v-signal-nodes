@@ -31,6 +31,7 @@ pub(super) enum Text {
     Input,
     Output,
     DeleteNode,
+    AdvancedParams,
     NodeLimitReached,
     ConnectionCreatesCycle,
     ConnectionIncompatible,
@@ -53,6 +54,7 @@ pub(super) enum Text {
     ZoomOut,
     ResetZoom,
     RunRealtime,
+    StopRealtime,
     RunAsync,
     // Toggle parameter values, the same for every plugin.
     On,
@@ -102,6 +104,7 @@ impl Language {
             (Self::English, Text::Input) => "Input",
             (Self::English, Text::Output) => "Output",
             (Self::English, Text::DeleteNode) => "Delete node",
+            (Self::English, Text::AdvancedParams) => "Advanced parameters",
             (Self::English, Text::NodeLimitReached) => "Node limit reached",
             (Self::English, Text::ConnectionCreatesCycle) => {
                 "Connection refused: it would create a cycle"
@@ -126,6 +129,7 @@ impl Language {
             (Self::English, Text::ZoomOut) => "Zoom out",
             (Self::English, Text::ResetZoom) => "Actual size",
             (Self::English, Text::RunRealtime) => "Run in real time",
+            (Self::English, Text::StopRealtime) => "Stop running in real time",
             (Self::English, Text::RunAsync) => "Run once (async)",
             (Self::English, Text::On) => "on",
             (Self::English, Text::Off) => "off",
@@ -139,6 +143,7 @@ impl Language {
             (Self::Russian, Text::Input) => "Вход",
             (Self::Russian, Text::Output) => "Выход",
             (Self::Russian, Text::DeleteNode) => "Удалить ноду",
+            (Self::Russian, Text::AdvancedParams) => "Расширенные параметры",
             (Self::Russian, Text::NodeLimitReached) => "Достигнут лимит нод",
             (Self::Russian, Text::ConnectionCreatesCycle) => {
                 "Соединение отклонено: образуется цикл"
@@ -163,6 +168,7 @@ impl Language {
             (Self::Russian, Text::ZoomOut) => "Уменьшить",
             (Self::Russian, Text::ResetZoom) => "Реальный размер",
             (Self::Russian, Text::RunRealtime) => "Запуск в реальном времени",
+            (Self::Russian, Text::StopRealtime) => "Остановить выполнение в реальном времени",
             (Self::Russian, Text::RunAsync) => "Однократный запуск (асинхронно)",
             (Self::Russian, Text::On) => "вкл",
             (Self::Russian, Text::Off) => "выкл",

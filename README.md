@@ -30,9 +30,9 @@ bits are planned.
 > [!NOTE]
 > **Status: early development.** You can build graphs in the editor and run them:
 > in real time on the default output device, or once on background threads, which
-> for now only reports the result in the debug panel. You can't edit parameters or
-> save graphs yet. The plugin API is still changing, and plugins built for one API
-> version are refused by hosts built for another.
+> for now only reports the result in the debug panel. You can edit parameters while
+> it runs, but you can't save graphs yet. The plugin API is still changing, and
+> plugins built for one API version are refused by hosts built for another.
 
 ## Contents
 
@@ -93,6 +93,9 @@ sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev lib
 | Connect                      | Click an output socket, then an input socket           |
 | Disconnect                   | Right-click a socket                                   |
 | Delete a node                | The cross in its header                                |
+| Change a number              | Drag its field sideways (slower with `Shift`), or click and type |
+| Change a choice or a toggle  | Click it on the node                                   |
+| Advanced parameters          | The `⋯` button in the header opens them in a window    |
 | Clear the selection          | Click empty canvas or press `Esc`                      |
 | Zoom, snap to grid, language | Toolbar                                                |
 
@@ -216,7 +219,9 @@ export_plugin!(MyPlugin);
   after another; `ProcessIo::input_channels` / `output_channels` split it.
 - **Parameters** are declared as key constants (`NumberParam`, `ChoiceParam`,
   `ToggleParam`) that build the `ParamSpec` and read the value with
-  `io.get(KEY)`, so the id and kind can't drift apart.
+  `io.get(KEY)`, so the id and kind can't drift apart. The editor shows a parameter
+  on the node, or in the node's separate window if its spec is marked
+  `.advanced()`.
 - **Labels are written in English in the spec.** Translations are keyed by
   `TextKey`: the node name, a socket by index, a parameter by id, or a choice
   option by parameter id and index. That way, renaming the English label keeps
@@ -254,7 +259,7 @@ already load a dynamic library, but the editor doesn't call it yet.
 - [ ] Different sample rates in one graph (decimation, interpolation)
 - [ ] Device and file I/O: SDRs, ADCs/DACs, sound cards, signal files (SigMF)
 - [ ] Bridges to other plugins and devices: SoapySDR, FMI 3.0 models (FMU), CLAP
-- [ ] Editing node parameters
+- [x] Editing node parameters
 - [ ] Saving and loading graphs, undo and redo
 - [ ] Selecting and moving several nodes at once
 - [ ] Loading external plugins from the editor

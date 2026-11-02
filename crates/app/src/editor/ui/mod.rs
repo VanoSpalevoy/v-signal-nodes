@@ -25,6 +25,7 @@
 //! | [`debug`]   | bottom          | status line and the list of connections            |
 //! | [`palette`] | left            | node kinds to drag onto the canvas                 |
 //! | [`canvas`]  | central         | nodes and connections: drag, connect, delete       |
+//! | [`params`]  | windows         | parameter controls, advanced parameters windows    |
 //! | [`node`]    | —               | node model and geometry ([`NodeWidget`], sockets)  |
 //! | [`placement`] | —             | keeping nodes from overlapping                     |
 //! | [`routing`] | —               | routing connections around nodes                   |
@@ -44,9 +45,12 @@
 
 mod canvas;
 mod debug;
+#[cfg(test)]
+mod headless;
 mod menu;
 mod node;
 mod palette;
+mod params;
 mod placement;
 mod routing;
 mod toolbar;
@@ -96,6 +100,7 @@ pub(super) fn render(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
     debug::show(app, ui);
     palette::show(app, ui);
     canvas::show(app, ui);
+    params::show_advanced_windows(app, ui);
 }
 
 /// Frame shared by the side panels: `fill` background and padding, no outline.

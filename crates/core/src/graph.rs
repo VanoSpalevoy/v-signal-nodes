@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 
-use crate::{Node, NodeSocket, SocketDirection};
+use crate::{Error, Node, NodeSocket, ParamValue, SocketDirection};
 
 /// Id of a node in a [`Graph`]: a slot index plus the slot's generation.
 ///
@@ -126,6 +126,16 @@ struct Slot {
     node: Option<Node>,
 }
 
+/// Node `id` in `slots`, if it is there. A function of the slots alone, so the caller
+/// can still change the graph's other fields while holding the node.
+fn live_node_mut(slots: &mut [Slot], id: NodeId) -> Option<&mut Node> {
+    slots
+        .get_mut(id.index())
+        .filter(|slot| slot.generation == id.generation)?
+        .node
+        .as_mut()
+}
+
 /// Nodes and the connections between them; acyclic, each input fed at most once.
 #[derive(Clone, Debug, Default)]
 pub struct Graph {
@@ -157,8 +167,9 @@ impl Graph {
 
     /// Grows with every change to this graph, so whoever derives something from it
     /// (a compiled plan) can tell it's out of date without comparing the content.
-    /// [`node_mut`](Self::node_mut) counts as a change. Only comparable between
-    /// states of one graph: a different graph may have the same number.
+    /// [`node_mut`](Self::node_mut) counts as a change; [`set_param`](Self::set_param)
+    /// doesn't, and is for whoever passes the new value on itself. Only comparable
+    /// between states of one graph: a different graph may have the same number.
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -229,14 +240,19 @@ impl Graph {
 
     /// Node `id`, to change its parameters ([`Node::set_param`]).
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
-        let node = self
-            .slots
-            .get_mut(id.index())
-            .filter(|slot| slot.generation == id.generation)?
-            .node
-            .as_mut()?;
+        let node = live_node_mut(&mut self.slots, id)?;
         self.revision += 1;
         Some(node)
+    }
+
+    /// Sets a parameter of node `id` ([`Node::set_param`]) without changing the
+    /// [`revision`](Self::revision): a live edit, which shouldn't recompile anything.
+    /// The caller passes the value on to whatever runs the graph; plans compiled from
+    /// now on have it anyway.
+    pub fn set_param(&mut self, id: NodeId, param: &str, value: ParamValue) -> Result<(), Error> {
+        live_node_mut(&mut self.slots, id)
+            .ok_or(Error::Graph(GraphError::MissingNode(id)))?
+            .set_param(param, value)
     }
 
     /// Every node with its id, by id.
@@ -387,7 +403,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{NodeKind, NodeSpec, ParamSpec, ParamValue, SignalRate};
+    use crate::{NodeKind, NodeSpec, ParamSpec, SignalRate};
 
     /// A node with `inputs` inputs and one output.
     fn node(inputs: usize) -> Node {
@@ -454,6 +470,41 @@ mod tests {
             graph.node(ids[0]).unwrap().param("gain"),
             Some(ParamValue::Number(2.0))
         );
+    }
+
+    #[test]
+    fn set_param_changes_the_value_but_not_the_revision() {
+        let (mut graph, ids) = graph(1);
+        let revision = graph.revision();
+
+        graph
+            .set_param(ids[0], "gain", ParamValue::Number(2.0))
+            .unwrap();
+
+        assert_eq!(
+            graph.node(ids[0]).unwrap().param("gain"),
+            Some(ParamValue::Number(2.0))
+        );
+        assert_eq!(graph.revision(), revision);
+    }
+
+    #[test]
+    fn set_param_refuses_what_the_node_would() {
+        let (mut graph, ids) = graph(1);
+
+        assert!(matches!(
+            graph.set_param(ids[0], "gain", ParamValue::Toggle(true)),
+            Err(Error::ParamRejected { .. })
+        ));
+        assert!(matches!(
+            graph.set_param(ids[0], "nope", ParamValue::Number(1.0)),
+            Err(Error::UnknownParam { .. })
+        ));
+        graph.remove(ids[0]);
+        assert!(matches!(
+            graph.set_param(ids[0], "gain", ParamValue::Number(1.0)),
+            Err(Error::Graph(GraphError::MissingNode(_)))
+        ));
     }
 
     #[test]

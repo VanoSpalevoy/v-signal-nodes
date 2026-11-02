@@ -36,6 +36,16 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
                 {
                     app.execute(Command::SnapToGrid);
                 }
+                // Replace with icons.
+                for command in [
+                    Command::RunRealtime,
+                    Command::StopRealtime,
+                    Command::RunAsync,
+                ] {
+                    if ui.button(app.language.text(command.text())).clicked() {
+                        app.execute(command);
+                    }
+                }
                 ui.separator();
                 ui.add(
                     egui::Slider::new(&mut app.scale, SCALE_RANGE)
@@ -43,6 +53,9 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
                         .text(app.language.text(Text::Scale))
                         .show_value(true),
                 );
+                if ui.button(app.language.text(Text::ResetZoom)).clicked() {
+                    app.execute(Command::ResetZoom);
+                }
                 ui.separator();
                 caption(ui, app.language.text(Text::Settings));
                 ui.add_space(4.0);

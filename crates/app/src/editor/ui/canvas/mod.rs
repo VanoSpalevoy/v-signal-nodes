@@ -6,6 +6,7 @@
 //! | [`interaction`]   | pointer and palette input, turned into `VSignalNodesApp` calls |
 //! | [`connections`]   | [`RouteCache`]: connection routes kept up to date per frame |
 //! | [`paint`]         | drawing everything, read-only                               |
+//! | [`controls`]      | parameter controls on the nodes                             |
 //!
 //! # Coordinates
 //!
@@ -50,6 +51,8 @@
 //! | secondary click output socket           | remove every connection from that output        |
 //! | secondary click input socket            | remove the connection into that input           |
 //! | primary click `✕`                       | delete the node and its connections             |
+//! | primary click the `⋯` in a node header  | open or close its advanced parameters window    |
+//! | use a control in a parameter row        | change the parameter (see [`params`](super::params)) |
 //! | click empty canvas, or `Esc`            | clear the pending source                        |
 //! | drop a palette button on the canvas     | add a node centered on the pointer              |
 //! | click a palette button                  | add a node in the middle of the visible area    |
@@ -83,8 +86,11 @@
 //!    deferred).
 //! 4. Paint ([`paint::paint`]): grid, connections, nodes, the node drop preview,
 //!    the pending-source curve, then the palette drop preview on top.
+//! 5. Show the parameter controls ([`controls::show`]), above the painted nodes and,
+//!    being created last, winning clicks over them.
 
 mod connections;
+mod controls;
 mod interaction;
 mod paint;
 
@@ -98,7 +104,8 @@ use v_signal_nodes_core::{NodeId, SocketDirection};
 
 /// Height of the tinted header band holding the title and the delete button.
 const HEADER_HEIGHT: f32 = 28.0;
-/// Side of the square delete button in the node header's right end.
+/// Side of the square delete and advanced parameters buttons in the node header's
+/// right end.
 const DELETE_BUTTON_SIZE: f32 = 18.0;
 /// Distance of the delete button from the node's top-right corner.
 const NODE_INSET: f32 = 5.0;
@@ -147,6 +154,7 @@ impl View {
 struct Hovered {
     socket: Option<SocketRef>,
     delete_button: Option<NodeId>,
+    advanced_button: Option<NodeId>,
 }
 
 /// The scroll state of the last frame, to keep the view centered across zoom changes.
@@ -236,6 +244,17 @@ fn show_content(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
         ui.ctx().request_repaint();
     }
     paint::paint(app, ui, view, viewport, &hovered, pointer);
+    controls::show(app, ui, view, viewport);
+}
+
+/// Whether `node` shows plain text instead of its parameter controls: while another
+/// node is dragged over it, as the controls are drawn above every node. Nodes overlap
+/// only then.
+fn controls_hidden(app: &VSignalNodesApp, node: &NodeWidget) -> bool {
+    app.dragged_node()
+        .filter(|&dragged| dragged != node.id)
+        .and_then(|dragged| app.node(dragged))
+        .is_some_and(|dragged| dragged.rect().intersects(node.rect()))
 }
 
 /// Content fills at least the viewport and grows to fit every node (`rects`) plus
@@ -291,4 +310,196 @@ fn delete_button_rect(node: &NodeWidget) -> egui::Rect {
         ),
         egui::Vec2::splat(DELETE_BUTTON_SIZE),
     )
+}
+
+/// The advanced parameters button's area in canvas coordinates: next to the delete
+/// button, on its left.
+fn advanced_button_rect(node: &NodeWidget) -> egui::Rect {
+    delete_button_rect(node).translate(egui::vec2(-DELETE_BUTTON_SIZE, 0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::editor::tests::add;
+    use crate::editor::ui::headless::{self, Frames, SCREEN};
+    use std::sync::Arc;
+    use v_signal_nodes_core::{
+        Node, NodeKind as Role, NodeSocket, NodeSpec, ParamSpec, ParamValue,
+    };
+    use v_signal_nodes_plugin_std::{GAIN, MIXER, SOURCE};
+
+    /// A headless canvas: node interaction and controls, in the order of a real frame,
+    /// without the panels and the scroll area, so screen = canvas × `scale`.
+    struct Canvas {
+        frames: Frames,
+        app: VSignalNodesApp,
+        view: View,
+    }
+
+    impl Canvas {
+        fn new(scale: f32) -> Self {
+            Self {
+                frames: Frames::new(),
+                app: VSignalNodesApp::default(),
+                view: View {
+                    origin: egui::Vec2::ZERO,
+                    scale,
+                },
+            }
+        }
+
+        fn add(&mut self, type_id: &str) -> NodeId {
+            add(&mut self.app, type_id, egui::pos2(50.0, 50.0))
+        }
+
+        /// Runs one frame with `events`.
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            let (app, view) = (&mut self.app, self.view);
+            self.frames.run(events, |ui| {
+                interaction::handle_node_interactions(app, ui, view, SCREEN);
+                controls::show(app, ui, view, SCREEN);
+            });
+        }
+
+        /// Moves the pointer to `pos` and clicks there.
+        fn click(&mut self, pos: egui::Pos2) {
+            for events in headless::click(pos) {
+                self.frame(events);
+            }
+        }
+
+        /// Presses at `from`, drags by `delta` and lets go.
+        fn drag(&mut self, from: egui::Pos2, delta: egui::Vec2) {
+            self.frame(vec![egui::Event::PointerMoved(from)]);
+            self.frame(vec![headless::button(from, true)]);
+            for step in 1..=4 {
+                let pos = from + delta * (step as f32 / 4.0);
+                self.frame(vec![egui::Event::PointerMoved(pos)]);
+            }
+            self.frame(vec![headless::button(from + delta, false)]);
+            self.frame(Vec::new());
+        }
+
+        /// The center on screen of the control in parameter row `row` of `node`.
+        fn control(&self, node: NodeId, row: usize) -> egui::Pos2 {
+            let node = self.app.node(node).unwrap();
+            self.view.rect(node.param_rect(row)).center()
+        }
+
+        /// The center on screen of the advanced parameters button of `node`.
+        fn advanced_button(&self, node: NodeId) -> egui::Pos2 {
+            let node = self.app.node(node).unwrap();
+            self.view.rect(advanced_button_rect(&node)).center()
+        }
+
+        fn param(&self, node: NodeId, id: &str) -> ParamValue {
+            self.app.graph.node(node).unwrap().param(id).unwrap()
+        }
+    }
+
+    #[test]
+    fn dragging_a_number_control_changes_it_and_leaves_the_node_in_place() {
+        for scale in [1.0, 2.0] {
+            let mut canvas = Canvas::new(scale);
+            let gain = canvas.add(GAIN);
+            let pos = canvas.app.node(gain).unwrap().pos;
+
+            canvas.frame(Vec::new());
+            canvas.drag(canvas.control(gain, 0), egui::vec2(40.0, 0.0));
+
+            let value = canvas.param(gain, "gain").as_number().unwrap();
+            assert!(value > 1.0, "at zoom {scale}: {value}");
+            assert_eq!(canvas.app.node(gain).unwrap().pos, pos, "at zoom {scale}");
+            assert_eq!(canvas.app.dragged_node(), None);
+        }
+    }
+
+    #[test]
+    fn dragging_the_rest_of_the_body_still_moves_the_node() {
+        let mut canvas = Canvas::new(1.0);
+        let gain = canvas.add(GAIN);
+        let pos = canvas.app.node(gain).unwrap().pos;
+        let title = pos + egui::vec2(30.0, 14.0);
+
+        canvas.frame(Vec::new());
+        canvas.drag(title, egui::vec2(100.0, 60.0));
+
+        assert_eq!(canvas.param(gain, "gain"), ParamValue::Number(1.0));
+        assert_ne!(canvas.app.node(gain).unwrap().pos, pos);
+    }
+
+    #[test]
+    fn a_choice_control_offers_its_options() {
+        let mut canvas = Canvas::new(1.0);
+        let source = canvas.add(SOURCE);
+        let control = canvas.control(source, 0);
+
+        canvas.frame(Vec::new());
+        canvas.click(control);
+        // The list opens right below the control; its second row is another option.
+        canvas.click(control + egui::vec2(0.0, 48.0));
+
+        assert_eq!(canvas.param(source, "signal"), ParamValue::Choice(1));
+    }
+
+    #[test]
+    fn a_toggle_control_flips() {
+        let spec = NodeSpec::new("test.toggle", "Toggle", Role::Generator)
+            .output(NodeSocket::signal_out("out"))
+            .param(ParamSpec::toggle("on", "On", true));
+        let mut canvas = Canvas::new(1.0);
+        // No plugin offers this type, so it goes straight into the graph.
+        let node = canvas.app.graph.add(Node::new(Arc::new(spec)));
+        canvas.app.positions.insert(node, egui::pos2(50.0, 50.0));
+        canvas.app.z_order.push(node);
+        let control = canvas.control(node, 0);
+
+        canvas.frame(Vec::new());
+        canvas.click(control);
+        assert_eq!(canvas.param(node, "on"), ParamValue::Toggle(false));
+
+        canvas.click(control);
+        assert_eq!(canvas.param(node, "on"), ParamValue::Toggle(true));
+    }
+
+    #[test]
+    fn the_button_opens_and_closes_the_advanced_window_of_nodes_that_have_one() {
+        let mut canvas = Canvas::new(1.0);
+        let mixer = canvas.add(MIXER);
+        let button = canvas.advanced_button(mixer);
+
+        canvas.frame(Vec::new());
+        canvas.click(button);
+        assert_eq!(canvas.app.advanced_windows, [mixer]);
+
+        canvas.click(button);
+        assert!(canvas.app.advanced_windows.is_empty());
+
+        let mut canvas = Canvas::new(1.0);
+        let gain = canvas.add(GAIN);
+        let button = canvas.advanced_button(gain);
+        canvas.frame(Vec::new());
+        canvas.click(button);
+        assert!(canvas.app.advanced_windows.is_empty(), "nothing to open");
+    }
+
+    #[test]
+    fn controls_of_a_node_under_the_dragged_one_are_hidden() {
+        let mut canvas = Canvas::new(1.0);
+        let below = canvas.add(GAIN);
+        let dragged = canvas.add(GAIN);
+        let hidden = |canvas: &Canvas, id| {
+            let node = canvas.app.node(id).unwrap();
+            controls_hidden(&canvas.app, &node)
+        };
+        assert!(!hidden(&canvas, below));
+
+        canvas.app.begin_drag(dragged);
+        let over = canvas.app.node(below).unwrap().pos;
+        canvas.app.drag_to(dragged, over);
+
+        assert!(hidden(&canvas, below));
+        assert!(!hidden(&canvas, dragged));
+    }
 }

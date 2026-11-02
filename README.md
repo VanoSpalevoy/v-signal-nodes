@@ -263,7 +263,7 @@ already load a dynamic library, but the editor doesn't call it yet.
 - [x] Localized interface and node labels
 - [x] CI on Linux, macOS and Windows
 - [x] Graph in `core` with connection checks and generational node ids
-- [ ] Graph runtime: real-time processing and an offline pass
+- [x] Graph runtime: real-time processing and an offline pass
 - [ ] Sample formats beyond real numbers: complex (IQ) and digital (bits)
 - [ ] Different sample rates in one graph (decimation, interpolation)
 - [ ] Device and file I/O: SDRs, ADCs/DACs, sound cards, signal files (SigMF)

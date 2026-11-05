@@ -620,7 +620,9 @@ mod tests {
     use v_signal_nodes_core::{Graph, InputRef, Node, NodeKind, NodeSocket, NodeSpec, compile};
     use v_signal_nodes_plugin_api::{NodeProvider, Plugin, Registrar};
     use v_signal_nodes_plugin_host::PluginHost;
-    use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE, StdPlugin};
+    use v_signal_nodes_plugin_std::{
+        AMPLIFIER, DEVICE_OUTPUT, GENERATOR, SUMMING_AMPLIFIER, StdPlugin,
+    };
 
     const FRAMES: usize = 64;
     /// Type id of [`StereoSink`].
@@ -707,10 +709,10 @@ mod tests {
     /// the source and gain ids.
     fn branches() -> (Builder, NodeId, NodeId) {
         let mut builder = Builder::new();
-        let source = builder.add(SOURCE);
-        let gain = builder.add(GAIN);
-        let direct = builder.add(SINK);
-        let amplified = builder.add(SINK);
+        let source = builder.add(GENERATOR);
+        let gain = builder.add(AMPLIFIER);
+        let direct = builder.add(DEVICE_OUTPUT);
+        let amplified = builder.add(DEVICE_OUTPUT);
         builder.connect(source, direct);
         builder.connect(source, gain);
         builder.connect(gain, amplified);
@@ -750,7 +752,7 @@ mod tests {
     #[test]
     fn output_nodes_get_their_signal_converted() {
         let mut builder = Builder::new();
-        let source = builder.add(SOURCE);
+        let source = builder.add(GENERATOR);
         let sink = builder.add(STEREO_SINK);
         builder.connect(source, sink);
         let mut engine = builder.engine();
@@ -773,9 +775,9 @@ mod tests {
     /// amplifier and something to keep its output readable; the amplifier's id.
     fn sum_of_two(first: f32, second: f32) -> (Builder, NodeId) {
         let mut builder = Builder::new();
-        let sum = builder.add(MIXER);
+        let sum = builder.add(SUMMING_AMPLIFIER);
         for (input, phase) in [first, second].into_iter().enumerate() {
-            let source = builder.add(SOURCE);
+            let source = builder.add(GENERATOR);
             let node = builder.graph.node_mut(source).unwrap();
             node.set_param("phase", ParamValue::Number(phase)).unwrap();
             builder
@@ -783,7 +785,7 @@ mod tests {
                 .connect(OutputRef::new(source, 0), InputRef::new(sum, input))
                 .unwrap();
         }
-        let sink = builder.add(SINK);
+        let sink = builder.add(DEVICE_OUTPUT);
         builder.connect(sum, sink);
         (builder, sum)
     }
@@ -818,8 +820,8 @@ mod tests {
     #[test]
     fn a_generator_added_during_a_run_shares_the_time_of_the_others() {
         let mut builder = Builder::new();
-        let early = builder.add(SOURCE);
-        let sink = builder.add(SINK);
+        let early = builder.add(GENERATOR);
+        let sink = builder.add(DEVICE_OUTPUT);
         builder.connect(early, sink);
         let first_plan = compile(&builder.graph).unwrap();
         let previous: Vec<_> = first_plan.steps().iter().map(|step| step.node).collect();
@@ -831,8 +833,8 @@ mod tests {
             first.process(FRAMES).unwrap();
         }
 
-        let late = builder.graph.add(host.build_node(SOURCE).unwrap());
-        let other_sink = builder.graph.add(host.build_node(SINK).unwrap());
+        let late = builder.graph.add(host.build_node(GENERATOR).unwrap());
+        let other_sink = builder.graph.add(host.build_node(DEVICE_OUTPUT).unwrap());
         builder
             .graph
             .connect(OutputRef::new(late, 0), InputRef::new(other_sink, 0))
@@ -855,7 +857,7 @@ mod tests {
     #[test]
     fn an_unconnected_output_node_gets_silence() {
         let mut builder = Builder::new();
-        builder.add(SINK);
+        builder.add(DEVICE_OUTPUT);
         let mut engine = builder.engine();
 
         engine.process(FRAMES).unwrap();
@@ -1031,18 +1033,18 @@ mod tests {
     /// A chain-and-fan graph of std nodes that needs conversions and buffer reuse.
     fn busy_graph() -> Builder {
         let mut builder = Builder::new();
-        let first = builder.add(SOURCE);
-        let second = builder.add(SOURCE);
+        let first = builder.add(GENERATOR);
+        let second = builder.add(GENERATOR);
         for source in [first, second] {
             let mut last = source;
             for _ in 0..4 {
-                let gain = builder.add(GAIN);
+                let gain = builder.add(AMPLIFIER);
                 builder.connect(last, gain);
                 last = gain;
             }
-            let sink = builder.add(SINK);
+            let sink = builder.add(DEVICE_OUTPUT);
             builder.connect(last, sink);
-            let direct = builder.add(SINK);
+            let direct = builder.add(DEVICE_OUTPUT);
             builder.connect(source, direct);
         }
         builder

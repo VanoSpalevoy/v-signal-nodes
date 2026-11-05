@@ -321,7 +321,7 @@ mod tests {
     use super::*;
     use v_signal_nodes_core::{Graph, InputRef, OutputRef, compile};
     use v_signal_nodes_plugin_host::PluginHost;
-    use v_signal_nodes_plugin_std::{GAIN, SINK, SOURCE, StdPlugin};
+    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, GENERATOR, StdPlugin};
 
     const MAX_FRAMES: usize = 64;
 
@@ -381,8 +381,8 @@ mod tests {
     #[test]
     fn plays_the_output_node_across_device_blocks() {
         let mut run = Run::new();
-        let source = run.add(SOURCE);
-        let sink = run.add(SINK);
+        let source = run.add(GENERATOR);
+        let sink = run.add(DEVICE_OUTPUT);
         run.connect(source, sink);
         run.send_plan().unwrap();
 
@@ -401,21 +401,21 @@ mod tests {
         // Stopping a sine mid-period and restarting from a fresh processor would jump;
         // with the state kept, the next samples continue the same wave.
         let mut continued = Run::new();
-        let source = continued.add(SOURCE);
-        let sink = continued.add(SINK);
+        let source = continued.add(GENERATOR);
+        let sink = continued.add(DEVICE_OUTPUT);
         continued.connect(source, sink);
         continued.send_plan().unwrap();
         let mut uninterrupted = Run::new();
-        let source2 = uninterrupted.add(SOURCE);
-        let sink2 = uninterrupted.add(SINK);
+        let source2 = uninterrupted.add(GENERATOR);
+        let sink2 = uninterrupted.add(DEVICE_OUTPUT);
         uninterrupted.connect(source2, sink2);
         uninterrupted.send_plan().unwrap();
         let first = continued.render(MAX_FRAMES);
         assert_eq!(first, uninterrupted.render(MAX_FRAMES));
 
         // A node joins that adds nothing to the signal path of the first sink.
-        let other = continued.add(SOURCE);
-        let extra = continued.add(GAIN);
+        let other = continued.add(GENERATOR);
+        let extra = continued.add(AMPLIFIER);
         continued.connect(other, extra);
         continued.send_plan().unwrap();
 
@@ -429,8 +429,8 @@ mod tests {
     #[test]
     fn replaced_engines_come_back_to_be_dropped() {
         let mut run = Run::new();
-        let source = run.add(SOURCE);
-        let sink = run.add(SINK);
+        let source = run.add(GENERATOR);
+        let sink = run.add(DEVICE_OUTPUT);
         run.connect(source, sink);
         run.send_plan().unwrap();
         run.send_plan().unwrap();
@@ -443,8 +443,8 @@ mod tests {
     #[test]
     fn too_many_unanswered_replaces_are_refused_and_recover() {
         let mut run = Run::new();
-        let source = run.add(SOURCE);
-        let sink = run.add(SINK);
+        let source = run.add(GENERATOR);
+        let sink = run.add(DEVICE_OUTPUT);
         run.connect(source, sink);
         for _ in 0..MAX_REPLACES_IN_FLIGHT {
             run.send_plan().unwrap();
@@ -460,9 +460,9 @@ mod tests {
     #[test]
     fn parameter_messages_reach_the_engine() {
         let mut run = Run::new();
-        let source = run.add(SOURCE);
-        let gain = run.add(GAIN);
-        let sink = run.add(SINK);
+        let source = run.add(GENERATOR);
+        let gain = run.add(AMPLIFIER);
+        let sink = run.add(DEVICE_OUTPUT);
         run.connect(source, gain);
         run.connect(gain, sink);
         run.send_plan().unwrap();
@@ -486,8 +486,8 @@ mod tests {
     #[test]
     fn reset_restarts_the_signal() {
         let mut run = Run::new();
-        let source = run.add(SOURCE);
-        let sink = run.add(SINK);
+        let source = run.add(GENERATOR);
+        let sink = run.add(DEVICE_OUTPUT);
         run.connect(source, sink);
         run.send_plan().unwrap();
         let first = run.render(8);
@@ -501,8 +501,8 @@ mod tests {
     #[test]
     fn clear_goes_silent() {
         let mut run = Run::new();
-        let source = run.add(SOURCE);
-        let sink = run.add(SINK);
+        let source = run.add(GENERATOR);
+        let sink = run.add(DEVICE_OUTPUT);
         run.connect(source, sink);
         run.send_plan().unwrap();
         run.render(8);
@@ -528,8 +528,8 @@ mod tests {
         }
 
         let mut run = Run::new();
-        let source = run.add(SOURCE);
-        let sink = run.add(SINK);
+        let source = run.add(GENERATOR);
+        let sink = run.add(DEVICE_OUTPUT);
         run.connect(source, sink);
         let plan = compile(&run.graph).unwrap();
         run.controller
@@ -550,13 +550,13 @@ mod tests {
     #[test]
     fn a_failed_build_leaves_the_old_plan_running() {
         let mut run = Run::new();
-        let source = run.add(SOURCE);
-        let sink = run.add(SINK);
+        let source = run.add(GENERATOR);
+        let sink = run.add(DEVICE_OUTPUT);
         run.connect(source, sink);
         run.send_plan().unwrap();
         run.render(8);
 
-        let extra = run.add(SINK);
+        let extra = run.add(DEVICE_OUTPUT);
         run.connect(source, extra);
         let plan = compile(&run.graph).unwrap();
         let result = run
@@ -601,9 +601,9 @@ mod tests {
     #[test]
     fn the_sum_stays_in_device_range() {
         let mut run = Run::new();
-        let source = run.add(SOURCE);
+        let source = run.add(GENERATOR);
         for _ in 0..4 {
-            let sink = run.add(SINK);
+            let sink = run.add(DEVICE_OUTPUT);
             run.connect(source, sink);
         }
         run.send_plan().unwrap();

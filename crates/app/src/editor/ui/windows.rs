@@ -26,7 +26,7 @@ use std::time::Duration;
 use eframe::egui;
 use v_signal_nodes_core::{AxisUnit, NodeId, WindowContent};
 
-use super::{NodeWidget, NodeWindow, PANEL_BG, panel_frame, params, plot};
+use super::{NodeWidget, NodeWindow, PANEL_BG, header_fill, panel_frame, params, plot};
 use crate::editor::execution::{PlotFeed, read_feed};
 use crate::editor::{Language, VSignalNodesApp};
 
@@ -78,7 +78,8 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &egui::Ui) {
         };
         match kind {
             NodeWindow::AdvancedParams => {
-                floating(&mut open).resizable(false).show(ui.ctx(), |ui| {
+                let window = floating(&mut open).resizable(false);
+                show_floating(ui.ctx(), window, &node, |ui| {
                     let changed = params::advanced_window(ui, &node, language);
                     edits.extend(changed.into_iter().map(|edit| (node_id, edit)));
                 });
@@ -93,10 +94,10 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &egui::Ui) {
                             language,
                         };
                         if matches!(kind, NodeWindow::Preview(_)) {
-                            floating(&mut open)
+                            let window = floating(&mut open)
                                 .default_size(PREVIEW_DEFAULT_SIZE)
-                                .min_size(PREVIEW_MIN_SIZE)
-                                .show(ui.ctx(), |ui| contents.show(ui));
+                                .min_size(PREVIEW_MIN_SIZE);
+                            show_floating(ui.ctx(), window, &node, |ui| contents.show(ui));
                         } else {
                             let plot = PlotWindow {
                                 window: (node_id, kind),
@@ -119,6 +120,31 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &egui::Ui) {
     for (node_id, kind) in closed {
         app.close_window(node_id, kind);
     }
+}
+
+/// Shows a floating `window` of `node` with its title bar in the node's header
+/// color, so it shows whose it is. Also on top: egui paints the title bar of the
+/// topmost window with the fill of open widgets, so that fill is swapped while the
+/// title bar is painted, and the contents get the theme as it is.
+fn show_floating(
+    ctx: &egui::Context,
+    window: egui::Window,
+    node: &NodeWidget,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let theme = ctx.global_style();
+    let fill = header_fill(node.spec());
+    let mut titled = (*theme).clone();
+    titled.visuals.widgets.open.weak_bg_fill = fill;
+    ctx.set_global_style(titled);
+    window
+        .title_frame(egui::Frame::window(&theme).fill(fill))
+        .show(ctx, |ui| {
+            ctx.set_global_style(Arc::clone(&theme));
+            ui.set_style(Arc::clone(&theme));
+            add_contents(ui);
+        });
+    ctx.set_global_style(theme);
 }
 
 /// The id of a floating window of a node.
@@ -237,9 +263,9 @@ mod tests {
             (editor, scope)
         }
 
-        fn frame(&mut self, events: Vec<egui::Event>) {
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
             let app = &mut self.app;
-            self.frames.run(events, |ui| render(app, ui));
+            self.frames.run(events, |ui| render(app, ui))
         }
 
         fn click(&mut self, pos: egui::Pos2) {
@@ -289,6 +315,31 @@ mod tests {
         editor.click(rect.right_top() + egui::vec2(-16.0, 16.0));
 
         assert!(editor.app.open_windows.is_empty());
+    }
+
+    #[test]
+    fn floating_windows_have_their_nodes_header_color_also_on_top() {
+        for kind in [NodeWindow::AdvancedParams, NodeWindow::Preview(0)] {
+            let at = egui::pos2(100.0, 200.0);
+            let (mut editor, scope) = Editor::with_window(at, kind);
+            let fill = header_fill(editor.app.node(scope).unwrap().spec());
+            // Past the fade-in, which dims every color of the window.
+            for _ in 0..20 {
+                editor.frame(Vec::new());
+            }
+            let output = editor.frame(Vec::new());
+
+            let window = editor
+                .frames
+                .ctx
+                .memory(|memory| memory.area_rect(window_id(scope, kind)))
+                .unwrap();
+            let title_bar = output.shapes.iter().any(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) => rect.fill == fill && rect.rect.min == window.min,
+                _ => false,
+            });
+            assert!(title_bar, "{kind:?}");
+        }
     }
 
     #[test]

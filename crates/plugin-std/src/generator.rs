@@ -1,4 +1,4 @@
-//! [`SOURCE`]: a voltage generator.
+//! [`GENERATOR`]: a voltage generator.
 //!
 //! A periodic voltage of a set frequency, amplitude, starting phase and DC offset:
 //! `offset + amplitude · waveform(frequency · time + phase)`, with the waveform within
@@ -17,7 +17,7 @@ use v_signal_nodes_plugin_api::{
     ParamKey, PluginError, ProcessIo, TextKey,
 };
 
-use crate::SOURCE;
+use crate::GENERATOR;
 
 /// The waveform; options in index order: [`WAVEFORMS`].
 const WAVEFORM: ChoiceParam = ChoiceParam("signal");
@@ -32,11 +32,11 @@ const PHASE: NumberParam = NumberParam("phase");
 /// The DC offset in volts.
 const OFFSET: NumberParam = NumberParam("offset");
 
-pub(crate) struct Source;
+pub(crate) struct Generator;
 
-impl NodeProvider for Source {
+impl NodeProvider for Generator {
     fn spec(&self) -> NodeSpec {
-        NodeSpec::new(SOURCE, "Generator", NodeKind::Generator)
+        NodeSpec::new(GENERATOR, "Generator", NodeKind::Generator)
             .output(NodeSocket::signal_out("Out"))
             .param(WAVEFORM.spec("Waveform", WAVEFORMS, 0))
             .param(FREQUENCY.spec("Frequency, Hz", 0.1, 1_000_000.0, 1000.0))
@@ -62,16 +62,16 @@ impl NodeProvider for Source {
     }
 
     fn create_processor(&self) -> Box<dyn NodeProcessor> {
-        Box::new(SourceProcessor { sample_rate: 0.0 })
+        Box::new(GeneratorProcessor { sample_rate: 0.0 })
     }
 }
 
-struct SourceProcessor {
+struct GeneratorProcessor {
     /// Samples per second, from `prepare`.
     sample_rate: f64,
 }
 
-impl NodeProcessor for SourceProcessor {
+impl NodeProcessor for GeneratorProcessor {
     fn prepare(&mut self, sample_rate: f32, _max_frames: usize) -> Result<(), PluginError> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
             return Err(PluginError::new(format!(
@@ -145,40 +145,48 @@ mod tests {
     fn the_waveform_follows_the_time_of_the_run() {
         // A 1 Hz square at 4 samples per second: two highs, two lows, repeating.
         let params = params(1, 1.0, 1.0, 0.0);
-        let mut processor = prepared(&Source);
+        let mut processor = prepared(&Generator);
         let mut block =
-            |position| run_at(position, &Source, processor.as_mut(), &params, &[], 3).unwrap();
+            |position| run_at(position, &Generator, processor.as_mut(), &params, &[], 3).unwrap();
         assert_eq!(block(0), [1.0, 1.0, -1.0]);
         assert_eq!(block(3), [-1.0, 1.0, 1.0]);
         // No history: a new processor at the same time gives the same.
-        let mut late = prepared(&Source);
-        let output = run_at(3, &Source, late.as_mut(), &params, &[], 3).unwrap();
+        let mut late = prepared(&Generator);
+        let output = run_at(3, &Generator, late.as_mut(), &params, &[], 3).unwrap();
         assert_eq!(output, [-1.0, 1.0, 1.0]);
     }
 
     #[test]
     fn the_phase_shifts_the_start_of_the_waveform() {
-        let mut processor = prepared(&Source);
+        let mut processor = prepared(&Generator);
         let at = |phase| with_phase(0, 1.0, 2.0, phase, 0.0);
 
         // A sine at a quarter of its period starts at its peak.
-        let output = run(&Source, processor.as_mut(), &at(90.0), &[], 1).unwrap();
+        let output = run(&Generator, processor.as_mut(), &at(90.0), &[], 1).unwrap();
         assert_eq!(output, [2.0]);
         // A full turn is the same as none.
-        let full = run(&Source, processor.as_mut(), &at(360.0), &[], 4).unwrap();
-        let none = run(&Source, processor.as_mut(), &at(0.0), &[], 4).unwrap();
+        let full = run(&Generator, processor.as_mut(), &at(360.0), &[], 4).unwrap();
+        let none = run(&Generator, processor.as_mut(), &at(0.0), &[], 4).unwrap();
         assert_eq!(full, none);
     }
 
     #[test]
     fn waveforms_in_antiphase_cancel_out_also_far_into_a_run() {
-        let mut processor = prepared(&Source);
+        let mut processor = prepared(&Generator);
         // A day at 4 samples per second, and a frequency without a neat period.
         let position = 345_600;
         for waveform in [0, 1, 3] {
             let at = |phase| with_phase(waveform, 0.37, 7.0, phase, 0.0);
-            let mut signal =
-                |phase| run_at(position, &Source, processor.as_mut(), &at(phase), &[], 16);
+            let mut signal = |phase| {
+                run_at(
+                    position,
+                    &Generator,
+                    processor.as_mut(),
+                    &at(phase),
+                    &[],
+                    16,
+                )
+            };
             let first = signal(0.0).unwrap();
             let second = signal(180.0).unwrap();
             for (a, b) in first.iter().zip(&second) {
@@ -189,20 +197,20 @@ mod tests {
 
     #[test]
     fn the_voltage_has_the_set_amplitude_and_offset() {
-        let mut processor = prepared(&Source);
+        let mut processor = prepared(&Generator);
         let params = params(1, 1.0, 5.0, 2.0);
 
-        let output = run(&Source, processor.as_mut(), &params, &[], 4).unwrap();
+        let output = run(&Generator, processor.as_mut(), &params, &[], 4).unwrap();
 
         assert_eq!(output, [7.0, 7.0, -3.0, -3.0]);
     }
 
     #[test]
     fn the_frequency_stops_at_half_the_sample_rate() {
-        let mut processor = prepared(&Source);
+        let mut processor = prepared(&Generator);
         let params = params(1, 1000.0, 1.0, 0.0);
 
-        let output = run(&Source, processor.as_mut(), &params, &[], 4).unwrap();
+        let output = run(&Generator, processor.as_mut(), &params, &[], 4).unwrap();
 
         assert_eq!(
             output,
@@ -213,9 +221,9 @@ mod tests {
 
     #[test]
     fn needs_a_valid_sample_rate() {
-        let mut processor = Source.create_processor();
+        let mut processor = Generator.create_processor();
         assert!(processor.prepare(0.0, 16).is_err());
         let params = params(0, 1.0, 1.0, 0.0);
-        assert!(run(&Source, processor.as_mut(), &params, &[], 1).is_err());
+        assert!(run(&Generator, processor.as_mut(), &params, &[], 1).is_err());
     }
 }

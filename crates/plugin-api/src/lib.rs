@@ -158,7 +158,7 @@ pub trait NodeProcessor: Send {
 /// One node type offered by a plugin.
 pub trait NodeProvider: Send + Sync {
     /// The node type's description. Its `type_id` should be namespaced by the
-    /// plugin, e.g. `"std.gain"`.
+    /// plugin, e.g. `"std.amplifier"`.
     fn spec(&self) -> NodeSpec;
 
     /// Creates the processing state for a new node instance.

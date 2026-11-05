@@ -157,17 +157,17 @@ mod tests {
     use super::*;
     use crate::editor::tests::assert_apart;
     use v_signal_nodes_core::{NodeId, ParamValue};
-    use v_signal_nodes_plugin_std::{GAIN, MIXER, SINK, SOURCE};
+    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, GENERATOR, SUMMING_AMPLIFIER};
 
     /// An app with source 0 → gain 1 → mixer 2 (inputs 0 and 1) and an unconnected
     /// source 3, and their ids.
     fn sample_graph() -> (VSignalNodesApp, Vec<NodeId>) {
         let mut app = VSignalNodesApp::default();
         let ids: Vec<_> = [
-            (SOURCE, 0.0, 0.0),
-            (GAIN, 250.0, 0.0),
-            (MIXER, 500.0, 0.0),
-            (SOURCE, 250.0, 300.0),
+            (GENERATOR, 0.0, 0.0),
+            (AMPLIFIER, 250.0, 0.0),
+            (SUMMING_AMPLIFIER, 500.0, 0.0),
+            (GENERATOR, 250.0, 300.0),
         ]
         .into_iter()
         .map(|(type_id, x, y)| {
@@ -207,7 +207,10 @@ mod tests {
 
         let mut opened = VSignalNodesApp::default();
         let sink = opened
-            .add_node_at(opened.kind_of(SINK).unwrap(), egui::pos2(900.0, 900.0))
+            .add_node_at(
+                opened.kind_of(DEVICE_OUTPUT).unwrap(),
+                egui::pos2(900.0, 900.0),
+            )
             .unwrap();
         opened.select_source(OutputRef::new(sink, 0));
         opened.open_document(&document).unwrap();
@@ -220,7 +223,7 @@ mod tests {
         assert_eq!(opened.pending_source, None);
         assert_eq!(opened.graph.len(), 4);
         let added = opened
-            .add_node_at(opened.kind_of(SINK).unwrap(), egui::Pos2::ZERO)
+            .add_node_at(opened.kind_of(DEVICE_OUTPUT).unwrap(), egui::Pos2::ZERO)
             .unwrap();
         assert_eq!(added.index(), 4, "numbers continue after the loaded ones");
     }

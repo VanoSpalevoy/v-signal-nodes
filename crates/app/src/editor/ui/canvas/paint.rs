@@ -12,7 +12,8 @@ use super::{
 };
 use crate::editor::ui::routing::{self, Route};
 use crate::editor::ui::{
-    ACCENT, CONTROL_HOVER, DANGER, NodeKind, NodeWindow, PANEL_BG, TEXT, TEXT_DIM, node_color,
+    ACCENT, CONTROL_HOVER, DANGER, NodeKind, NodeWindow, PANEL_BG, TEXT, TEXT_DIM, header_fill,
+    node_color,
 };
 use crate::editor::{Language, NodeWidget, SocketRef, VSignalNodesApp};
 use v_signal_nodes_core::{NodeId, SocketDirection};
@@ -21,8 +22,6 @@ use v_signal_nodes_core::{NodeId, SocketDirection};
 const NODE_ROUNDING: f32 = 8.0;
 /// Width of the kind-colored node outline; the node body itself has the panel color.
 const NODE_OUTLINE_WIDTH: f32 = 1.5;
-/// Opacity of the kind color tinting the node header.
-const HEADER_TINT: f32 = 0.16;
 /// Horizontal padding of the title from the node's left edge.
 const TITLE_PADDING: f32 = 10.0;
 /// Half the length of each stroke of the drawn delete cross.
@@ -434,7 +433,7 @@ fn paint_header(painter: &egui::Painter, view: View, node: &NodeWidget, language
             sw: 0,
             se: 0,
         },
-        color.gamma_multiply(HEADER_TINT),
+        header_fill(node.spec()),
     );
     painter.hline(
         header.x_range(),

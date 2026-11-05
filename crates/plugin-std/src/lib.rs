@@ -4,13 +4,13 @@
 //! and the stream is sampled finely enough to stand for a continuous signal. All
 //! sockets are mono, one conductor each.
 //!
-//! | Type id            | Module           | Kind       | Inputs     | Outputs | Parameters                                 |
-//! |--------------------|------------------|------------|------------|---------|--------------------------------------------|
-//! | `std.source`       | [`source`]       | Generator  | —          | Out     | Waveform, Frequency, Amplitude, Phase, *Offset* |
-//! | `std.gain`         | [`gain`]         | Processor  | In         | Out     | Gain, *Clipping, Supply*                   |
-//! | `std.mixer`        | [`mixer`]        | Processor  | In 1, 2, 3 | Out     | Gain, *Weight 1, 2, 3*, *Clipping, Supply* |
-//! | `std.sink`         | [`sink`]         | Output     | In         | —       | —                                          |
-//! | `std.oscillograph` | [`oscillograph`] | Instrument | In         | —       | Sweep, *Trigger*, *Level*                  |
+//! | Type id                 | Module                | Kind       | Inputs     | Outputs | Parameters                                 |
+//! |-------------------------|-----------------------|------------|------------|---------|--------------------------------------------|
+//! | `std.generator`         | [`generator`]         | Generator  | —          | Out     | Waveform, Frequency, Amplitude, Phase, *Offset* |
+//! | `std.amplifier`         | [`amplifier`]         | Processor  | In         | Out     | Gain, *Clipping, Supply*                   |
+//! | `std.summing_amplifier` | [`summing_amplifier`] | Processor  | In 1, 2, 3 | Out     | Gain, *Weight 1, 2, 3*, *Clipping, Supply* |
+//! | `std.device_output`     | [`device_output`]     | Output     | In         | —       | —                                          |
+//! | `std.oscillograph`      | [`oscillograph`]      | Instrument | In         | —       | Sweep, *Trigger*, *Level*                  |
 //!
 //! Parameters in italics are advanced (`ParamSpec::advanced`). The oscillograph also
 //! has a window with its screen. Every label is English in the spec, with Russian
@@ -22,11 +22,11 @@
 //! the rules a processor has to follow (sample rate from `prepare`, no
 //! allocations in `process`).
 
-pub mod gain;
-pub mod mixer;
+pub mod amplifier;
+pub mod device_output;
+pub mod generator;
 pub mod oscillograph;
-pub mod sink;
-pub mod source;
+pub mod summing_amplifier;
 
 use v_signal_nodes_plugin_api::{
     NumberParam, ParamKey, ParamSpec, Plugin, PluginError, ProcessIo, Registrar, TextKey,
@@ -34,15 +34,15 @@ use v_signal_nodes_plugin_api::{
 };
 
 /// Type id of the voltage generator.
-pub const SOURCE: &str = "std.source";
+pub const GENERATOR: &str = "std.generator";
 /// Type id of the amplifier.
-pub const GAIN: &str = "std.gain";
+pub const AMPLIFIER: &str = "std.amplifier";
 /// Type id of the summing amplifier.
-pub const MIXER: &str = "std.mixer";
+pub const SUMMING_AMPLIFIER: &str = "std.summing_amplifier";
 /// Type id of the oscillograph.
 pub const OSCILLOGRAPH: &str = "std.oscillograph";
 /// Type id of the output to the device.
-pub const SINK: &str = "std.sink";
+pub const DEVICE_OUTPUT: &str = "std.device_output";
 
 /// Whether an amplifier stage clips at its [`SUPPLY`], like a real one. Off by default:
 /// an ideal stage does what its gain says, however high the voltage.
@@ -89,10 +89,10 @@ impl Plugin for StdPlugin {
     }
 
     fn register(&self, registrar: &mut dyn Registrar) {
-        registrar.register_node(Box::new(source::Source));
-        registrar.register_node(Box::new(gain::Gain));
-        registrar.register_node(Box::new(mixer::Mixer));
-        registrar.register_node(Box::new(sink::Sink));
+        registrar.register_node(Box::new(generator::Generator));
+        registrar.register_node(Box::new(amplifier::Amplifier));
+        registrar.register_node(Box::new(summing_amplifier::SummingAmplifier));
+        registrar.register_node(Box::new(device_output::DeviceOutput));
         registrar.register_node(Box::new(oscillograph::Oscillograph));
     }
 }
@@ -181,7 +181,13 @@ mod tests {
     #[test]
     fn every_type_id_is_registered() {
         let specs = specs();
-        for type_id in [SOURCE, GAIN, MIXER, SINK, OSCILLOGRAPH] {
+        for type_id in [
+            GENERATOR,
+            AMPLIFIER,
+            SUMMING_AMPLIFIER,
+            DEVICE_OUTPUT,
+            OSCILLOGRAPH,
+        ] {
             assert!(
                 specs.iter().any(|spec| spec.type_id == type_id),
                 "{type_id}"

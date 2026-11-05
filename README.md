@@ -69,13 +69,13 @@ bits are planned.
   fill the screen. The editor draws them, so a plugin needs no UI code, also across
   the C ABI.
 - **Standard nodes for analog electrical signals,** where every sample is a voltage
-  in volts: `std.source` (a generator: sine/square/saw/triangle, frequency,
-  amplitude, phase, offset; generators of one frequency keep their set phases, so 0°
-  and 180° add up to zero), `std.gain` (an amplifier, inverting if negative, with
-  optional clipping at its supply), `std.mixer` (a summing amplifier, sample by
-  sample), `std.sink` (the output to the
-  device, 1 V is full scale) and `std.oscillograph` (a triggered sweep on a screen
-  in its window; it needs no output node and nothing it looks at is heard).
+  in volts: `std.generator` (sine/square/saw/triangle, frequency, amplitude, phase,
+  offset; generators of one frequency keep their set phases, so 0° and 180° add up
+  to zero), `std.amplifier` (inverting if negative, with optional clipping at its
+  supply), `std.summing_amplifier` (sums its inputs sample by sample),
+  `std.device_output` (1 V is the device's full scale) and `std.oscillograph` (a
+  triggered sweep on a screen in its window; it needs no output node and nothing it
+  looks at is heard).
 
 ## Getting started
 

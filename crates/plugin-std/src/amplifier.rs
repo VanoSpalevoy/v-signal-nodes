@@ -1,4 +1,4 @@
-//! [`GAIN`]: an amplifier stage.
+//! [`AMPLIFIER`]: an amplifier stage.
 //!
 //! The output voltage is the input voltage times the gain (negative: inverting). With
 //! clipping on (off by default), it stays within the supply voltage like a real stage.
@@ -8,17 +8,17 @@ use v_signal_nodes_plugin_api::{
     PluginError, ProcessIo, TextKey,
 };
 
-use crate::{GAIN, clipping_specs, clipping_translations, output_limit};
+use crate::{AMPLIFIER, clipping_specs, clipping_translations, output_limit};
 
 /// The voltage gain, V/V.
 const FACTOR: NumberParam = NumberParam("gain");
 
-pub(crate) struct Gain;
+pub(crate) struct Amplifier;
 
-impl NodeProvider for Gain {
+impl NodeProvider for Amplifier {
     fn spec(&self) -> NodeSpec {
         let [clipping, supply] = clipping_specs();
-        NodeSpec::new(GAIN, "Amplifier", NodeKind::Processor)
+        NodeSpec::new(AMPLIFIER, "Amplifier", NodeKind::Processor)
             .input(NodeSocket::signal_in("In"))
             .output(NodeSocket::signal_out("Out"))
             .param(FACTOR.spec("Gain", -100.0, 100.0, 1.0))
@@ -37,13 +37,13 @@ impl NodeProvider for Gain {
     }
 
     fn create_processor(&self) -> Box<dyn NodeProcessor> {
-        Box::new(GainProcessor)
+        Box::new(AmplifierProcessor)
     }
 }
 
-struct GainProcessor;
+struct AmplifierProcessor;
 
-impl NodeProcessor for GainProcessor {
+impl NodeProcessor for AmplifierProcessor {
     fn process(&mut self, io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
         let gain = io.get(FACTOR)?;
         let limit = output_limit(io)?;
@@ -63,13 +63,20 @@ mod tests {
 
     /// The output for `input`; `supply` turns clipping on.
     fn amplified(gain: f32, supply: Option<f32>, input: &[f32]) -> Vec<f32> {
-        let mut processor = prepared(&Gain);
+        let mut processor = prepared(&Amplifier);
         let params = [
             ParamValue::Number(gain),
             ParamValue::Toggle(supply.is_some()),
             ParamValue::Number(supply.unwrap_or(15.0)),
         ];
-        run(&Gain, processor.as_mut(), &params, &[input], input.len()).unwrap()
+        run(
+            &Amplifier,
+            processor.as_mut(),
+            &params,
+            &[input],
+            input.len(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -95,13 +102,13 @@ mod tests {
 
     #[test]
     fn wrong_parameter_kinds_are_errors() {
-        let mut processor = prepared(&Gain);
+        let mut processor = prepared(&Amplifier);
         let wrong = [
             ParamValue::Choice(0),
             ParamValue::Toggle(false),
             ParamValue::Number(15.0),
         ];
-        let error = run(&Gain, processor.as_mut(), &wrong, &[&[1.0]], 1).unwrap_err();
+        let error = run(&Amplifier, processor.as_mut(), &wrong, &[&[1.0]], 1).unwrap_err();
         assert!(error.message().contains("'gain'"), "{error}");
     }
 }

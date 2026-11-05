@@ -330,7 +330,7 @@ mod tests {
     use v_signal_nodes_core::{
         Node, NodeKind as Role, NodeSocket, NodeSpec, ParamSpec, ParamValue,
     };
-    use v_signal_nodes_plugin_std::{GAIN, OSCILLOGRAPH, SINK, SOURCE};
+    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOGRAPH};
 
     /// A headless canvas: node interaction and controls, in the order of a real frame,
     /// without the panels and the scroll area, so screen = canvas × `scale`.
@@ -405,7 +405,7 @@ mod tests {
     fn dragging_a_number_control_changes_it_and_leaves_the_node_in_place() {
         for scale in [1.0, 2.0] {
             let mut canvas = Canvas::new(scale);
-            let gain = canvas.add(GAIN);
+            let gain = canvas.add(AMPLIFIER);
             let pos = canvas.app.node(gain).unwrap().pos;
 
             canvas.frame(Vec::new());
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn dragging_the_rest_of_the_body_still_moves_the_node() {
         let mut canvas = Canvas::new(1.0);
-        let gain = canvas.add(GAIN);
+        let gain = canvas.add(AMPLIFIER);
         let pos = canvas.app.node(gain).unwrap().pos;
         let title = pos + egui::vec2(30.0, 14.0);
 
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn a_choice_control_offers_its_options() {
         let mut canvas = Canvas::new(1.0);
-        let source = canvas.add(SOURCE);
+        let source = canvas.add(GENERATOR);
         let control = canvas.control(source, 0);
 
         canvas.frame(Vec::new());
@@ -495,7 +495,7 @@ mod tests {
         assert!(canvas.app.open_windows.is_empty());
 
         let mut canvas = Canvas::new(1.0);
-        let sink = canvas.add(SINK);
+        let sink = canvas.add(DEVICE_OUTPUT);
         let button = canvas.window_button(sink, 0);
         canvas.frame(Vec::new());
         canvas.click(button);
@@ -505,8 +505,8 @@ mod tests {
     #[test]
     fn controls_of_a_node_under_the_dragged_one_are_hidden() {
         let mut canvas = Canvas::new(1.0);
-        let below = canvas.add(GAIN);
-        let dragged = canvas.add(GAIN);
+        let below = canvas.add(AMPLIFIER);
+        let dragged = canvas.add(AMPLIFIER);
         let hidden = |canvas: &Canvas, id| {
             let node = canvas.app.node(id).unwrap();
             controls_hidden(&canvas.app, &node)

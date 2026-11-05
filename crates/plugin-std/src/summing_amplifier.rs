@@ -1,4 +1,4 @@
-//! [`MIXER`]: a summing amplifier.
+//! [`SUMMING_AMPLIFIER`]: a summing amplifier.
 //!
 //! The output voltage is the weighted sum of three input voltages, times the gain:
 //! `gain · (w1·V1 + w2·V2 + w3·V3)`, sample by sample. An unconnected input is at 0 V.
@@ -9,7 +9,7 @@ use v_signal_nodes_plugin_api::{
     PluginError, ProcessIo, TextKey,
 };
 
-use crate::{MIXER, clipping_specs, clipping_translations, output_limit};
+use crate::{SUMMING_AMPLIFIER, clipping_specs, clipping_translations, output_limit};
 
 /// The gain after the sum, V/V.
 const FACTOR: NumberParam = NumberParam("gain");
@@ -20,13 +20,13 @@ const WEIGHTS: [NumberParam; 3] = [
     NumberParam("weight3"),
 ];
 
-pub(crate) struct Mixer;
+pub(crate) struct SummingAmplifier;
 
-impl NodeProvider for Mixer {
+impl NodeProvider for SummingAmplifier {
     fn spec(&self) -> NodeSpec {
         let weight = |index: usize, name: &str| WEIGHTS[index].spec(name, -100.0, 100.0, 1.0);
         let [clipping, supply] = clipping_specs();
-        NodeSpec::new(MIXER, "Summing amplifier", NodeKind::Processor)
+        NodeSpec::new(SUMMING_AMPLIFIER, "Summing amplifier", NodeKind::Processor)
             .input(NodeSocket::signal_in("In 1"))
             .input(NodeSocket::signal_in("In 2"))
             .input(NodeSocket::signal_in("In 3"))
@@ -55,13 +55,13 @@ impl NodeProvider for Mixer {
     }
 
     fn create_processor(&self) -> Box<dyn NodeProcessor> {
-        Box::new(MixerProcessor)
+        Box::new(SummingAmplifierProcessor)
     }
 }
 
-struct MixerProcessor;
+struct SummingAmplifierProcessor;
 
-impl NodeProcessor for MixerProcessor {
+impl NodeProcessor for SummingAmplifierProcessor {
     fn process(&mut self, io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
         let gain = io.get(FACTOR)?;
         let limit = output_limit(io)?;
@@ -91,7 +91,7 @@ mod tests {
 
     /// The output for `inputs`; `supply` turns clipping on.
     fn mixed(gain: f32, weights: [f32; 3], supply: Option<f32>, inputs: [&[f32]; 3]) -> Vec<f32> {
-        let mut processor = prepared(&Mixer);
+        let mut processor = prepared(&SummingAmplifier);
         let params = [
             ParamValue::Number(gain),
             ParamValue::Number(weights[0]),
@@ -101,7 +101,7 @@ mod tests {
             ParamValue::Number(supply.unwrap_or(15.0)),
         ];
         run(
-            &Mixer,
+            &SummingAmplifier,
             processor.as_mut(),
             &params,
             &inputs,

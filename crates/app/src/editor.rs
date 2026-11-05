@@ -497,7 +497,9 @@ impl eframe::App for VSignalNodesApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use v_signal_nodes_plugin_std::{GAIN, MIXER, OSCILLOGRAPH, SINK, SOURCE};
+    use v_signal_nodes_plugin_std::{
+        AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOGRAPH, SUMMING_AMPLIFIER,
+    };
 
     /// Adds a node of type `type_id` at `pos` (or the nearest free spot).
     pub(super) fn add(app: &mut VSignalNodesApp, type_id: &str, pos: egui::Pos2) -> NodeId {
@@ -508,7 +510,13 @@ mod tests {
     fn mixers(count: usize) -> (VSignalNodesApp, Vec<NodeId>) {
         let mut app = VSignalNodesApp::default();
         let ids = (0..count)
-            .map(|i| add(&mut app, MIXER, egui::pos2(i as f32 * 300.0, 0.0)))
+            .map(|i| {
+                add(
+                    &mut app,
+                    SUMMING_AMPLIFIER,
+                    egui::pos2(i as f32 * 300.0, 0.0),
+                )
+            })
             .collect();
         (app, ids)
     }
@@ -669,7 +677,7 @@ mod tests {
         assert_eq!(app.graph.connection_count(), 0);
         assert_eq!(app.pending_source, None);
         // The freed slot (its number) is reused, the id itself is not.
-        let new = add(&mut app, SINK, egui::Pos2::ZERO);
+        let new = add(&mut app, DEVICE_OUTPUT, egui::Pos2::ZERO);
         assert_eq!(new.index(), ids[1].index());
         assert_ne!(new, ids[1]);
         assert!(app.node(ids[1]).is_none());
@@ -678,7 +686,7 @@ mod tests {
     #[test]
     fn parameters_change_without_a_new_revision() {
         let mut app = VSignalNodesApp::default();
-        let gain = add(&mut app, GAIN, egui::Pos2::ZERO);
+        let gain = add(&mut app, AMPLIFIER, egui::Pos2::ZERO);
         let revision = app.graph.revision();
 
         assert!(app.set_param(gain, 0, ParamValue::Number(0.5)));
@@ -693,7 +701,7 @@ mod tests {
     #[test]
     fn parameter_values_are_checked() {
         let mut app = VSignalNodesApp::default();
-        let gain = add(&mut app, GAIN, egui::Pos2::ZERO);
+        let gain = add(&mut app, AMPLIFIER, egui::Pos2::ZERO);
 
         assert!(!app.set_param(gain, 0, ParamValue::Number(1000.0)));
         assert!(!app.set_param(gain, 0, ParamValue::Toggle(true)));
@@ -749,7 +757,7 @@ mod tests {
     fn nodes_added_at_the_same_spot_do_not_overlap() {
         let mut app = VSignalNodesApp::default();
         for _ in 0..5 {
-            add(&mut app, MIXER, egui::pos2(100.0, 100.0));
+            add(&mut app, SUMMING_AMPLIFIER, egui::pos2(100.0, 100.0));
         }
 
         assert_apart(&app);
@@ -758,8 +766,8 @@ mod tests {
     /// Two gain nodes side by side, `NODE_GAP`-ish apart: ids 0 (left) and 1.
     fn two_nodes() -> (VSignalNodesApp, [NodeId; 2]) {
         let mut app = VSignalNodesApp::default();
-        let left = add(&mut app, GAIN, egui::pos2(0.0, 0.0));
-        let right = add(&mut app, GAIN, egui::pos2(300.0, 0.0));
+        let left = add(&mut app, AMPLIFIER, egui::pos2(0.0, 0.0));
+        let right = add(&mut app, AMPLIFIER, egui::pos2(300.0, 0.0));
         (app, [left, right])
     }
 
@@ -799,7 +807,7 @@ mod tests {
         // fourth node dragged right onto the middle one: no free spot nearby.
         let mut app = VSignalNodesApp::default();
         let ids: Vec<_> = (0..4)
-            .map(|_| add(&mut app, GAIN, egui::pos2(1000.0, 1000.0)))
+            .map(|_| add(&mut app, AMPLIFIER, egui::pos2(1000.0, 1000.0)))
             .collect();
         let step = app.node(ids[0]).unwrap().rect().height() + 12.0;
         for (i, &id) in ids[..3].iter().enumerate() {
@@ -913,7 +921,16 @@ mod tests {
             .map(|kind| kind.spec().type_id.as_str())
             .collect();
 
-        assert_eq!(type_ids, [SOURCE, GAIN, MIXER, SINK, OSCILLOGRAPH]);
+        assert_eq!(
+            type_ids,
+            [
+                GENERATOR,
+                AMPLIFIER,
+                SUMMING_AMPLIFIER,
+                DEVICE_OUTPUT,
+                OSCILLOGRAPH
+            ]
+        );
     }
 
     #[test]
@@ -934,7 +951,7 @@ mod tests {
     #[test]
     fn the_node_limit_is_kept() {
         let mut app = VSignalNodesApp::default();
-        let gain = app.kind_of(GAIN).unwrap();
+        let gain = app.kind_of(AMPLIFIER).unwrap();
         for _ in 0..MAX_NODE_COUNT {
             let node = app.build_node(&gain, []).unwrap();
             let id = app.graph.add(node);

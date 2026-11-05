@@ -13,7 +13,9 @@ use v_signal_nodes_plugin_api::{
     NodeProcessor, NodeProvider, Plugin, PluginError, ProcessIo, Registrar,
 };
 use v_signal_nodes_plugin_host::PluginHost;
-use v_signal_nodes_plugin_std::{GAIN, MIXER, OSCILLOGRAPH, SINK, SOURCE, StdPlugin};
+use v_signal_nodes_plugin_std::{
+    AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOGRAPH, SUMMING_AMPLIFIER, StdPlugin,
+};
 use v_signal_nodes_runtime::{plots, realtime};
 
 /// Counts the calls made while [`COUNTING`] is on, on this thread only.
@@ -129,10 +131,10 @@ fn the_real_time_thread_doesnt_allocate() {
     host.load(&StdPlugin).unwrap();
     host.load(&StereoSinkPlugin).unwrap();
     let mut graph = Graph::new();
-    let source = add(&mut graph, &host, SOURCE);
-    let gain = add(&mut graph, &host, GAIN);
-    let mixer = add(&mut graph, &host, MIXER);
-    let sink = add(&mut graph, &host, SINK);
+    let source = add(&mut graph, &host, GENERATOR);
+    let gain = add(&mut graph, &host, AMPLIFIER);
+    let mixer = add(&mut graph, &host, SUMMING_AMPLIFIER);
+    let sink = add(&mut graph, &host, DEVICE_OUTPUT);
     let direct = add(&mut graph, &host, STEREO_SINK);
     let scope = add(&mut graph, &host, OSCILLOGRAPH);
     connect(&mut graph, source, gain, 0);
@@ -168,7 +170,7 @@ fn the_real_time_thread_doesnt_allocate() {
     assert_eq!(messages, 0, "parameter and reset messages");
 
     // A changed graph: a new plan with one new node, the rest carried over.
-    let extra = add(&mut graph, &host, SINK);
+    let extra = add(&mut graph, &host, DEVICE_OUTPUT);
     connect(&mut graph, gain, extra, 0);
     controller.run_plan(compile(&graph).unwrap(), make).unwrap();
     let replacing = allocator_calls(|| renderer.render(&mut device, 2));

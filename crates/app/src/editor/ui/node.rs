@@ -329,7 +329,7 @@ impl<'a> NodeWidget<'a> {
     }
 }
 
-/// The kind of standard node `type_id` (e.g. `v_signal_nodes_plugin_std::GAIN`),
+/// The kind of standard node `type_id` (e.g. `v_signal_nodes_plugin_std::AMPLIFIER`),
 /// for tests that need real nodes without an app.
 #[cfg(test)]
 pub(in crate::editor) fn std_kind(type_id: &str) -> NodeKind {
@@ -342,7 +342,7 @@ pub(in crate::editor) fn std_kind(type_id: &str) -> NodeKind {
 mod tests {
     use super::*;
     use v_signal_nodes_core::{Graph, NodeSocket, ParamSpec};
-    use v_signal_nodes_plugin_std::{GAIN, MIXER, OSCILLOGRAPH, SOURCE};
+    use v_signal_nodes_plugin_std::{AMPLIFIER, GENERATOR, OSCILLOGRAPH, SUMMING_AMPLIFIER};
 
     /// A graph holding one node of `spec`, and its id.
     fn one_node(spec: Arc<NodeSpec>) -> (Graph, NodeId) {
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn node_geometry_expands_for_custom_sockets_and_content() {
-        let (graph, id) = one_node(std_spec(MIXER));
+        let (graph, id) = one_node(std_spec(SUMMING_AMPLIFIER));
         let node = NodeWidget::new(id, graph.node(id).unwrap(), egui::Pos2::ZERO);
 
         assert!(node.rect().height() > MIN_NODE_HEIGHT);
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn params_sit_below_sockets_inside_node() {
-        let (graph, id) = one_node(std_spec(SOURCE));
+        let (graph, id) = one_node(std_spec(GENERATOR));
         let node = NodeWidget::new(id, graph.node(id).unwrap(), egui::Pos2::ZERO);
         let last_socket = node.socket_pos(SocketDirection::Output, 0);
 
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn a_node_widens_only_for_buttons_that_do_not_fit() {
-        assert_eq!(node_size(&std_spec(GAIN)).x, NODE_WIDTH);
+        assert_eq!(node_size(&std_spec(AMPLIFIER)).x, NODE_WIDTH);
         assert_eq!(
             node_size(&std_spec(OSCILLOGRAPH)).x,
             NODE_WIDTH + HEADER_BUTTON_SIZE
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn node_param_label_follows_language() {
-        let (graph, id) = one_node(std_spec(GAIN));
+        let (graph, id) = one_node(std_spec(AMPLIFIER));
         let node = NodeWidget::new(id, graph.node(id).unwrap(), egui::Pos2::ZERO);
 
         assert_eq!(node.param_label(0, Language::English), "Gain: 1.0");

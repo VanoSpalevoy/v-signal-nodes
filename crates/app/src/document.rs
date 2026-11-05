@@ -15,7 +15,7 @@
 //!   "version": 1,
 //!   "used_plugins": ["std"],
 //!   "nodes": [
-//!     { "id": 0, "type_id": "std.gain", "pos": [40.0, 60.0], "params": { "gain": { "number": 0.5 } } }
+//!     { "id": 0, "type_id": "std.amplifier", "pos": [40.0, 60.0], "params": { "gain": { "number": 0.5 } } }
 //!   ],
 //!   "connections": [
 //!     { "from_node": 0, "from_output": 0, "to_node": 1, "to_input": 0 }
@@ -146,7 +146,7 @@ pub(crate) struct Document {
 pub(crate) struct DocNode {
     /// Node ID, unique within the document.
     pub id: usize,
-    /// Type id of the plugin node spec, e.g. `"std.gain"`.
+    /// Type id of the plugin node spec, e.g. `"std.amplifier"`.
     pub type_id: String,
     /// Top-left corner, canvas coordinates.
     pub pos: [f32; 2],
@@ -257,13 +257,13 @@ mod tests {
             vec![
                 DocNode {
                     id: 3,
-                    type_id: "std.source".into(),
+                    type_id: "std.generator".into(),
                     pos: [40.0, 60.0],
                     params: BTreeMap::new(),
                 },
                 DocNode {
                     id: 0,
-                    type_id: "std.gain".into(),
+                    type_id: "std.amplifier".into(),
                     pos: [300.0, 60.0],
                     params: BTreeMap::from([
                         ("gain".into(), ParamValue::Number(0.5)),
@@ -312,8 +312,8 @@ mod tests {
         let json = r#"{
             "version": 1,
             "nodes": [
-                { "id": 0, "type_id": "std.gain", "pos": [0, 0], "params": { "gain": { "number": 2.0 } } },
-                { "id": 1, "type_id": "std.sink", "pos": [200, 0] }
+                { "id": 0, "type_id": "std.amplifier", "pos": [0, 0], "params": { "gain": { "number": 2.0 } } },
+                { "id": 1, "type_id": "std.device_output", "pos": [200, 0] }
             ],
             "connections": []
         }"#;
@@ -337,11 +337,11 @@ mod tests {
         malformed(r#"{ "version": 1, "nodes": [], "connections": [], "extra": 0 }"#);
         malformed(
             r#"{ "version": 1, "connections": [],
-                 "nodes": [{ "id": 0, "type_id": "std.gain", "pos": [null, 0] }] }"#,
+                 "nodes": [{ "id": 0, "type_id": "std.amplifier", "pos": [null, 0] }] }"#,
         );
         malformed(
             r#"{ "version": 1, "connections": [],
-                 "nodes": [{ "id": 0, "type_id": "std.gain", "pos": [0, 0],
+                 "nodes": [{ "id": 0, "type_id": "std.amplifier", "pos": [0, 0],
                              "params": { "gain": { "percent": 5 } } }] }"#,
         );
         assert!(matches!(
@@ -351,7 +351,7 @@ mod tests {
         assert!(matches!(
             Document::from_json(
                 r#"{ "version": 1, "connections": [],
-                     "nodes": [{ "id": 0, "type_id": "std.gain", "pos": [0, -1e9] }] }"#,
+                     "nodes": [{ "id": 0, "type_id": "std.amplifier", "pos": [0, -1e9] }] }"#,
             ),
             Err(DocumentError::TooFarAway { node: 0 })
         ));

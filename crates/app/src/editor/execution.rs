@@ -394,7 +394,7 @@ mod tests {
     use super::*;
     use crate::editor::commands::Command;
     use v_signal_nodes_core::{InputRef, OutputRef};
-    use v_signal_nodes_plugin_std::{GAIN, OSCILLOGRAPH, SINK, SOURCE};
+    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOGRAPH};
 
     /// An app with source → gain → sink.
     fn runnable() -> VSignalNodesApp {
@@ -403,9 +403,9 @@ mod tests {
             app.add_node_at(app.kind_of(type_id).unwrap(), egui::pos2(x, 0.0))
                 .unwrap()
         };
-        let source = add(&mut app, SOURCE, 0.0);
-        let gain = add(&mut app, GAIN, 300.0);
-        let sink = add(&mut app, SINK, 600.0);
+        let source = add(&mut app, GENERATOR, 0.0);
+        let gain = add(&mut app, AMPLIFIER, 300.0);
+        let sink = add(&mut app, DEVICE_OUTPUT, 600.0);
         assert!(app.connect(OutputRef::new(source, 0), InputRef::new(gain, 0)));
         assert!(app.connect(OutputRef::new(gain, 0), InputRef::new(sink, 0)));
         app
@@ -421,7 +421,7 @@ mod tests {
         );
 
         let sink = app
-            .add_node_at(app.kind_of(SINK).unwrap(), egui::Pos2::ZERO)
+            .add_node_at(app.kind_of(DEVICE_OUTPUT).unwrap(), egui::Pos2::ZERO)
             .unwrap();
         app.refresh_compile_status();
         assert_eq!(app.execution.compile_error(), None);
@@ -462,7 +462,7 @@ mod tests {
         let mut app = VSignalNodesApp::default();
         let ctx = egui::Context::default();
         let sink = app
-            .add_node_at(app.kind_of(SINK).unwrap(), egui::Pos2::ZERO)
+            .add_node_at(app.kind_of(DEVICE_OUTPUT).unwrap(), egui::Pos2::ZERO)
             .unwrap();
         let settle = |app: &mut VSignalNodesApp| {
             for _ in 0..10 {
@@ -477,7 +477,7 @@ mod tests {
         settle(&mut app);
 
         let second = app
-            .add_node_at(app.kind_of(SINK).unwrap(), egui::pos2(300.0, 0.0))
+            .add_node_at(app.kind_of(DEVICE_OUTPUT).unwrap(), egui::pos2(300.0, 0.0))
             .unwrap();
         settle(&mut app);
         assert!(!app.execution.plan_outdated);
@@ -504,7 +504,7 @@ mod tests {
         let mut app = VSignalNodesApp::default();
         let ctx = egui::Context::default();
         let source = app
-            .add_node_at(app.kind_of(SOURCE).unwrap(), egui::Pos2::ZERO)
+            .add_node_at(app.kind_of(GENERATOR).unwrap(), egui::Pos2::ZERO)
             .unwrap();
         let scope = app
             .add_node_at(app.kind_of(OSCILLOGRAPH).unwrap(), egui::pos2(300.0, 0.0))
@@ -538,10 +538,10 @@ mod tests {
         let mut app = VSignalNodesApp::default();
         let ctx = egui::Context::default();
         let gain = app
-            .add_node_at(app.kind_of(GAIN).unwrap(), egui::Pos2::ZERO)
+            .add_node_at(app.kind_of(AMPLIFIER).unwrap(), egui::Pos2::ZERO)
             .unwrap();
         let sink = app
-            .add_node_at(app.kind_of(SINK).unwrap(), egui::pos2(300.0, 0.0))
+            .add_node_at(app.kind_of(DEVICE_OUTPUT).unwrap(), egui::pos2(300.0, 0.0))
             .unwrap();
         assert!(app.connect(OutputRef::new(gain, 0), InputRef::new(sink, 0)));
         app.refresh_compile_status();
@@ -562,7 +562,7 @@ mod tests {
         let mut app = runnable();
         let gain = app
             .nodes()
-            .find(|node| node.node.type_id() == GAIN)
+            .find(|node| node.node.type_id() == AMPLIFIER)
             .unwrap()
             .id;
 
@@ -580,7 +580,7 @@ mod tests {
         let mut app = VSignalNodesApp::default();
         let ctx = egui::Context::default();
         let source = app
-            .add_node_at(app.kind_of(SOURCE).unwrap(), egui::Pos2::ZERO)
+            .add_node_at(app.kind_of(GENERATOR).unwrap(), egui::Pos2::ZERO)
             .unwrap();
         let scope = app
             .add_node_at(app.kind_of(OSCILLOGRAPH).unwrap(), egui::pos2(300.0, 0.0))

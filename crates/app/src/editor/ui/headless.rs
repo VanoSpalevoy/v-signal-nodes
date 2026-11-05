@@ -22,8 +22,12 @@ impl Frames {
         }
     }
 
-    /// Runs one frame of `body` with `events`.
-    pub(super) fn run(&mut self, events: Vec<egui::Event>, body: impl FnMut(&mut egui::Ui)) {
+    /// Runs one frame of `body` with `events`; returns what it painted.
+    pub(super) fn run(
+        &mut self,
+        events: Vec<egui::Event>,
+        body: impl FnMut(&mut egui::Ui),
+    ) -> egui::FullOutput {
         self.time += 0.02;
         let input = egui::RawInput {
             screen_rect: Some(SCREEN),
@@ -34,6 +38,7 @@ impl Frames {
         let mut output = self.ctx.run_ui(input, body);
         // No renderer to take the textures.
         output.textures_delta.clear();
+        output
     }
 }
 

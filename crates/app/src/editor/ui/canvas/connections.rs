@@ -389,7 +389,7 @@ mod tests {
     use super::*;
     use crate::editor::ui::std_kind;
     use v_signal_nodes_core::Node;
-    use v_signal_nodes_plugin_std::{GAIN, SINK, SOURCE};
+    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, GENERATOR};
 
     /// A graph with its nodes placed: `ids[i]` at `pos[i]`.
     struct Layout {
@@ -407,10 +407,10 @@ mod tests {
                 ids: Vec::new(),
                 pos: Vec::new(),
             };
-            layout.add(SOURCE, 0.0, 0.0);
-            layout.add(GAIN, 250.0, 0.0);
-            layout.add(SINK, 500.0, 0.0);
-            layout.add(SOURCE, 0.0, 150.0);
+            layout.add(GENERATOR, 0.0, 0.0);
+            layout.add(AMPLIFIER, 250.0, 0.0);
+            layout.add(DEVICE_OUTPUT, 500.0, 0.0);
+            layout.add(GENERATOR, 0.0, 150.0);
             let ids = &layout.ids;
             let connections = [(ids[0], ids[2]), (ids[3], ids[1])];
             for (from, to) in connections {
@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(routes(&cache), routed);
 
         // A node far outside every influence area doesn't matter either.
-        layout.add(GAIN, 5_000.0, 5_000.0);
+        layout.add(AMPLIFIER, 5_000.0, 5_000.0);
         assert_eq!(layout.update(&mut cache, Duration::MAX).recomputed, 0);
 
         // Moving the gain in the way reroutes.

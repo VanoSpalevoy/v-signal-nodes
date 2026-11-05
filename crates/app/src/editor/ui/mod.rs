@@ -37,7 +37,8 @@
 //! - Panel order in [`render`] matters: egui panels added earlier claim their space
 //!   first, which is why the debug panel spans the full width under the palette.
 //! - Colors are the constants below, nothing else hardcodes UI colors (node kinds
-//!   use [`node_color`]). Primary text is [`TEXT`], secondary text [`TEXT_DIM`]
+//!   use [`node_color`], their headers and the title bars of their windows
+//!   [`header_fill`]). Primary text is [`TEXT`], secondary text [`TEXT_DIM`]
 //!   (also egui's "weak" text); [`ACCENT`] marks anything interactive or selected.
 //! - Panels share [`panel_frame`]: no outlines, only egui's thin separator lines.
 //!   The theme is installed once at startup by [`install_theme`], not per frame.
@@ -203,4 +204,13 @@ fn node_color(spec: &NodeSpec) -> egui::Color32 {
         Role::Output => egui::Color32::from_rgb(236, 128, 92),
         Role::Instrument => egui::Color32::from_rgb(84, 192, 214),
     }
+}
+
+/// Opacity of the kind color tinting a node header.
+const HEADER_TINT: f32 = 0.16;
+
+/// Fill of a node's header and of the title bars of its windows: its
+/// [`node_color`], faint over the panel color.
+fn header_fill(spec: &NodeSpec) -> egui::Color32 {
+    node_color(spec).gamma_multiply(HEADER_TINT)
 }

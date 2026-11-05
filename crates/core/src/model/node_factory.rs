@@ -23,7 +23,7 @@ use crate::{Error, SpecProblem};
 /// other languages, addressed by [`TextKey`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeSpec {
-    /// Globally unique type id, namespaced by the plugin, e.g. `"std.gain"`.
+    /// Globally unique type id, namespaced by the plugin, e.g. `"std.amplifier"`.
     pub type_id: String,
     /// Display name.
     pub name: String,

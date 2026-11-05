@@ -181,7 +181,7 @@ pub struct FfiTranslation {
 /// A [`NodeSpec`].
 #[repr(C)]
 pub struct FfiNodeSpec {
-    /// Namespaced type id, e.g. `"std.gain"`.
+    /// Namespaced type id, e.g. `"std.amplifier"`.
     pub type_id: FfiStr,
     /// Title (English).
     pub name: FfiStr,

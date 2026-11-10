@@ -58,25 +58,17 @@ impl NodeProcessor for AmplifierProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{prepared, run};
+    use crate::{CLIPPING, SUPPLY};
     use v_signal_nodes_plugin_api::ParamValue;
+    use v_signal_nodes_plugin_api::testing::Harness;
 
     /// The output for `input`; `supply` turns clipping on.
     fn amplified(gain: f32, supply: Option<f32>, input: &[f32]) -> Vec<f32> {
-        let mut processor = prepared(&Amplifier);
-        let params = [
-            ParamValue::Number(gain),
-            ParamValue::Toggle(supply.is_some()),
-            ParamValue::Number(supply.unwrap_or(15.0)),
-        ];
-        run(
-            &Amplifier,
-            processor.as_mut(),
-            &params,
-            &[input],
-            input.len(),
-        )
-        .unwrap()
+        let mut amplifier = Harness::new(&Amplifier).with(FACTOR, gain);
+        if let Some(supply) = supply {
+            amplifier.set(CLIPPING, true).set(SUPPLY, supply);
+        }
+        amplifier.run(&[input]).remove(0)
     }
 
     #[test]
@@ -102,13 +94,9 @@ mod tests {
 
     #[test]
     fn wrong_parameter_kinds_are_errors() {
-        let mut processor = prepared(&Amplifier);
-        let wrong = [
-            ParamValue::Choice(0),
-            ParamValue::Toggle(false),
-            ParamValue::Number(15.0),
-        ];
-        let error = run(&Amplifier, processor.as_mut(), &wrong, &[&[1.0]], 1).unwrap_err();
+        let mut amplifier = Harness::new(&Amplifier);
+        amplifier.set_raw(FACTOR.0, ParamValue::Choice(0));
+        let error = amplifier.process(1, &[&[1.0]]).unwrap_err();
         assert!(error.message().contains("'gain'"), "{error}");
     }
 }

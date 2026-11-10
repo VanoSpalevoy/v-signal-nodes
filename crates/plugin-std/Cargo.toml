@@ -8,5 +8,8 @@ license.workspace = true
 [dependencies]
 v-signal-nodes-plugin-api.workspace = true
 
+[dev-dependencies]
+v-signal-nodes-plugin-api = { workspace = true, features = ["testing"] }
+
 [lints]
 workspace = true

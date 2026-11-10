@@ -106,67 +106,6 @@ impl Plugin for StdPlugin {
 }
 
 #[cfg(test)]
-mod testing {
-    //! Running processors of this plugin without a host.
-
-    use v_signal_nodes_plugin_api::{
-        NodeProcessor, NodeProvider, ParamValue, PluginError, ProcessIo, RawBuffer,
-    };
-
-    /// A new processor of `provider`, prepared for 4 samples per second.
-    pub(crate) fn prepared(provider: &dyn NodeProvider) -> Box<dyn NodeProcessor> {
-        let mut processor = provider.create_processor();
-        processor.prepare(4.0, 16).unwrap();
-        processor
-    }
-
-    /// Runs a processor of `provider` once over `inputs` (one buffer per input
-    /// socket) and returns the buffer of its first output, all channels (empty
-    /// for a node without outputs).
-    pub(crate) fn run(
-        provider: &dyn NodeProvider,
-        processor: &mut dyn NodeProcessor,
-        params: &[ParamValue],
-        inputs: &[&[f32]],
-        frames: usize,
-    ) -> Result<Vec<f32>, PluginError> {
-        run_at(0, provider, processor, params, inputs, frames)
-    }
-
-    /// [`run`] for a block starting `position` frames into the run.
-    pub(crate) fn run_at(
-        position: u64,
-        provider: &dyn NodeProvider,
-        processor: &mut dyn NodeProcessor,
-        params: &[ParamValue],
-        inputs: &[&[f32]],
-        frames: usize,
-    ) -> Result<Vec<f32>, PluginError> {
-        let spec = provider.spec();
-        let mut output_samples: Vec<_> = spec
-            .outputs
-            .iter()
-            .map(|socket| vec![0.0; socket.buffer_len(frames)])
-            .collect();
-        let inputs: Vec<_> = inputs
-            .iter()
-            .map(|samples| RawBuffer::input(samples))
-            .collect();
-        let raw_outputs: Vec<_> = output_samples
-            .iter_mut()
-            .map(|samples| RawBuffer::output(samples))
-            .collect();
-        // SAFETY: the tests pass one buffer per input socket, of its length; the
-        // outputs are sized from the spec, live for the call and are separate
-        // vectors.
-        let mut io = unsafe { ProcessIo::from_raw(frames, &spec, params, &inputs, &raw_outputs) }
-            .with_position(position);
-        processor.process(&mut io)?;
-        Ok(output_samples.into_iter().next().unwrap_or_default())
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use v_signal_nodes_plugin_api::{NodeProvider, NodeSpec};

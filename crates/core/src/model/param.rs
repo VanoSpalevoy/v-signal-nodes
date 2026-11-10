@@ -95,6 +95,27 @@ impl ParamValue {
     }
 }
 
+/// What a [`NumberParam`] reads, back as a value.
+impl From<f32> for ParamValue {
+    fn from(value: f32) -> Self {
+        Self::Number(value)
+    }
+}
+
+/// What a [`ChoiceParam`] reads, back as a value.
+impl From<usize> for ParamValue {
+    fn from(index: usize) -> Self {
+        Self::Choice(index)
+    }
+}
+
+/// What a [`ToggleParam`] reads, back as a value.
+impl From<bool> for ParamValue {
+    fn from(on: bool) -> Self {
+        Self::Toggle(on)
+    }
+}
+
 /// A typed parameter key: the parameter's id plus the type of its value.
 pub trait ParamKey: Copy {
     /// What reading the parameter gives.

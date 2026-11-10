@@ -260,6 +260,31 @@ export_plugin!(MyPlugin);
 - Panics in dynamic-library plugins are caught at the C ABI boundary. This
   requires `panic = "unwind"`, which is the default.
 
+### Testing a node
+
+The `testing` feature of `plugin-api` adds `testing::Harness`, which runs one
+node's processor without a host, the way the host would. It starts with the
+spec's default parameters and changes them by key, prepares the processor before
+the first block, moves the run's position on from block to block, and collects
+the frames published to plot windows:
+
+```toml
+[dev-dependencies]
+v-signal-nodes-plugin-api = { workspace = true, features = ["testing"] }
+```
+
+```rust
+let mut gain = Harness::new(&MyGain).sample_rate(48_000.0).with(GAIN, 0.5);
+assert_eq!(gain.run(&[&[1.0, -2.0]]), [[0.5, -1.0]]);
+
+let mut scope = Harness::new(&MyScope).with(SWEEP, 1.0);
+scope.run(&[&signal]);
+let frame = &scope.plotted(SCREEN)[0]; // x_step, beams, trace
+```
+
+A test names only the parameters it cares about, so a new parameter elsewhere in
+the spec doesn't break it.
+
 ### Adding a plugin to the editor
 
 For now, add the crate as a dependency of `crates/app` and load it in

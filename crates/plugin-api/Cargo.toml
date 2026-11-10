@@ -8,5 +8,9 @@ license.workspace = true
 [dependencies]
 v-signal-nodes-core.workspace = true
 
+[features]
+# `testing`: a harness that runs one node's processor without a host, for plugin tests.
+testing = []
+
 [lints]
 workspace = true

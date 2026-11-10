@@ -86,28 +86,19 @@ impl NodeProcessor for SummingAmplifierProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{prepared, run};
-    use v_signal_nodes_plugin_api::ParamValue;
+    use crate::{CLIPPING, SUPPLY};
+    use v_signal_nodes_plugin_api::testing::Harness;
 
     /// The output for `inputs`; `supply` turns clipping on.
     fn mixed(gain: f32, weights: [f32; 3], supply: Option<f32>, inputs: [&[f32]; 3]) -> Vec<f32> {
-        let mut processor = prepared(&SummingAmplifier);
-        let params = [
-            ParamValue::Number(gain),
-            ParamValue::Number(weights[0]),
-            ParamValue::Number(weights[1]),
-            ParamValue::Number(weights[2]),
-            ParamValue::Toggle(supply.is_some()),
-            ParamValue::Number(supply.unwrap_or(15.0)),
-        ];
-        run(
-            &SummingAmplifier,
-            processor.as_mut(),
-            &params,
-            &inputs,
-            inputs[0].len(),
-        )
-        .unwrap()
+        let mut amplifier = Harness::new(&SummingAmplifier).with(FACTOR, gain);
+        for (key, weight) in WEIGHTS.into_iter().zip(weights) {
+            amplifier.set(key, weight);
+        }
+        if let Some(supply) = supply {
+            amplifier.set(CLIPPING, true).set(SUPPLY, supply);
+        }
+        amplifier.run(&inputs).remove(0)
     }
 
     #[test]

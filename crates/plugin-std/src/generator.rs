@@ -131,77 +131,59 @@ impl NodeProcessor for GeneratorProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{prepared, run, run_at};
-    use v_signal_nodes_plugin_api::ParamValue;
+    use v_signal_nodes_plugin_api::testing::Harness;
 
-    fn params(waveform: usize, frequency: f32, amplitude: f32, offset: f32) -> [ParamValue; 5] {
-        with_phase(waveform, frequency, amplitude, 0.0, offset)
-    }
+    /// Square waveform, the option index of "square".
+    const SQUARE: usize = 1;
 
-    fn with_phase(
-        waveform: usize,
-        frequency: f32,
-        amplitude: f32,
-        phase: f32,
-        offset: f32,
-    ) -> [ParamValue; 5] {
-        [
-            ParamValue::Choice(waveform),
-            ParamValue::Number(frequency),
-            ParamValue::Number(amplitude),
-            ParamValue::Number(phase),
-            ParamValue::Number(offset),
-        ]
+    /// A generator of 1 Hz at 4 samples per second: a period is 4 samples.
+    fn generator(waveform: usize) -> Harness {
+        Harness::new(&Generator)
+            .sample_rate(4.0)
+            .with(WAVEFORM, waveform)
+            .with(FREQUENCY, 1.0)
     }
 
     #[test]
     fn the_waveform_follows_the_time_of_the_run() {
-        // A 1 Hz square at 4 samples per second: two highs, two lows, repeating.
-        let params = params(1, 1.0, 1.0, 0.0);
-        let mut processor = prepared(&Generator);
-        let mut block =
-            |position| run_at(position, &Generator, processor.as_mut(), &params, &[], 3).unwrap();
-        assert_eq!(block(0), [1.0, 1.0, -1.0]);
-        assert_eq!(block(3), [-1.0, 1.0, 1.0]);
+        // Two highs, two lows, repeating.
+        let mut square = generator(SQUARE);
+        assert_eq!(square.generate(3), [[1.0, 1.0, -1.0]]);
+        assert_eq!(square.generate(3), [[-1.0, 1.0, 1.0]]);
         // No history: a new processor at the same time gives the same.
-        let mut late = prepared(&Generator);
-        let output = run_at(3, &Generator, late.as_mut(), &params, &[], 3).unwrap();
-        assert_eq!(output, [-1.0, 1.0, 1.0]);
+        let mut late = generator(SQUARE);
+        late.set_position(3);
+        assert_eq!(late.generate(3), [[-1.0, 1.0, 1.0]]);
     }
 
     #[test]
     fn the_phase_shifts_the_start_of_the_waveform() {
-        let mut processor = prepared(&Generator);
-        let at = |phase| with_phase(0, 1.0, 2.0, phase, 0.0);
+        let mut sine = generator(0).with(AMPLITUDE, 2.0);
+        let mut from_start = |phase| {
+            sine.set(PHASE, phase).set_position(0);
+            sine.generate(4).remove(0)
+        };
 
         // A sine at a quarter of its period starts at its peak.
-        let output = run(&Generator, processor.as_mut(), &at(90.0), &[], 1).unwrap();
-        assert_eq!(output, [2.0]);
+        assert_eq!(from_start(90.0)[0], 2.0);
         // A full turn is the same as none.
-        let full = run(&Generator, processor.as_mut(), &at(360.0), &[], 4).unwrap();
-        let none = run(&Generator, processor.as_mut(), &at(0.0), &[], 4).unwrap();
-        assert_eq!(full, none);
+        assert_eq!(from_start(360.0), from_start(0.0));
     }
 
     #[test]
     fn waveforms_in_antiphase_cancel_out_also_far_into_a_run() {
-        let mut processor = prepared(&Generator);
         // A day at 4 samples per second, and a frequency without a neat period.
         let position = 345_600;
         for waveform in [0, 1, 3] {
-            let at = |phase| with_phase(waveform, 0.37, 7.0, phase, 0.0);
+            let mut generator = generator(waveform)
+                .with(FREQUENCY, 0.37)
+                .with(AMPLITUDE, 7.0);
             let mut signal = |phase| {
-                run_at(
-                    position,
-                    &Generator,
-                    processor.as_mut(),
-                    &at(phase),
-                    &[],
-                    16,
-                )
+                generator.set(PHASE, phase).set_position(position);
+                generator.generate(16).remove(0)
             };
-            let first = signal(0.0).unwrap();
-            let second = signal(180.0).unwrap();
+            let first = signal(0.0);
+            let second = signal(180.0);
             for (a, b) in first.iter().zip(&second) {
                 assert!((a + b).abs() < 1e-5, "waveform {waveform}: {a} + {b}");
             }
@@ -210,33 +192,26 @@ mod tests {
 
     #[test]
     fn the_voltage_has_the_set_amplitude_and_offset() {
-        let mut processor = prepared(&Generator);
-        let params = params(1, 1.0, 5.0, 2.0);
+        let mut square = generator(SQUARE).with(AMPLITUDE, 5.0).with(OFFSET, 2.0);
 
-        let output = run(&Generator, processor.as_mut(), &params, &[], 4).unwrap();
-
-        assert_eq!(output, [7.0, 7.0, -3.0, -3.0]);
+        assert_eq!(square.generate(4), [[7.0, 7.0, -3.0, -3.0]]);
     }
 
     #[test]
     fn the_frequency_stops_at_half_the_sample_rate() {
-        let mut processor = prepared(&Generator);
-        let params = params(1, 1000.0, 1.0, 0.0);
-
-        let output = run(&Generator, processor.as_mut(), &params, &[], 4).unwrap();
+        let mut square = generator(SQUARE).with(FREQUENCY, 1000.0);
 
         assert_eq!(
-            output,
-            [1.0, -1.0, 1.0, -1.0],
+            square.generate(4),
+            [[1.0, -1.0, 1.0, -1.0]],
             "2 Hz at 4 samples per second"
         );
     }
 
     #[test]
     fn needs_a_valid_sample_rate() {
-        let mut processor = Generator.create_processor();
-        assert!(processor.prepare(0.0, 16).is_err());
-        let params = params(0, 1.0, 1.0, 0.0);
-        assert!(run(&Generator, processor.as_mut(), &params, &[], 1).is_err());
+        assert!(generator(0).sample_rate(0.0).process(1, &[]).is_err());
+        let mut unprepared = generator(0).without_prepare();
+        assert!(unprepared.process(1, &[]).is_err());
     }
 }

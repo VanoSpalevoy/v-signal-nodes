@@ -90,6 +90,8 @@ use std::marker::PhantomData;
 use std::slice;
 
 pub mod ffi;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use v_signal_nodes_core::{
     ChoiceParam, MAX_CHANNELS, MAX_PLOT_BEAMS, MAX_PLOT_POINTS, NodeKind, NodeSocket, NodeSpec,

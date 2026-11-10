@@ -334,74 +334,22 @@ impl NodeProcessor for SweepProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::c_void;
-    use v_signal_nodes_plugin_api::{ParamValue, RawBuffer, RawPlotSink};
+    use v_signal_nodes_plugin_api::testing::Harness;
 
     /// Samples per second of the tests: one sweep of 1 ms has 1000 frames.
     const RATE: f32 = 1_000_000.0;
+    /// Options of [`TRIGGER`].
+    const FREE_RUN: usize = 0;
+    const RISING: usize = 1;
+    const FALLING: usize = 2;
 
-    /// A frame as `process` published it, with its trace code.
-    type Frame = (f32, Vec<f32>, u8);
-
-    unsafe extern "C" fn record(
-        ctx: *mut c_void,
-        x_step: f32,
-        samples: *const f32,
-        len: usize,
-        _beams: usize,
-        _stride: usize,
-        trace: u8,
-    ) {
-        // SAFETY: `Bench::run` passes its frames as `ctx`, and `plot` a valid slice of
-        // one beam.
-        unsafe {
-            let frames = &mut *ctx.cast::<Vec<Frame>>();
-            let samples = std::slice::from_raw_parts(samples, len).to_vec();
-            frames.push((x_step, samples, trace));
-        }
-    }
-
-    /// A prepared processor and what it published.
-    struct Bench {
-        spec: NodeSpec,
-        processor: Box<dyn NodeProcessor>,
-        frames: Vec<Frame>,
-        /// The interpolation setting it runs with.
-        interpolation: bool,
-    }
-
-    impl Bench {
-        fn new() -> Self {
-            let mut processor = Oscilloscope.create_processor();
-            processor.prepare(RATE, 1 << 16).unwrap();
-            Self {
-                spec: Oscilloscope.spec(),
-                processor,
-                frames: Vec::new(),
-                interpolation: false,
-            }
-        }
-
-        fn run(&mut self, sweep_ms: f32, trigger: usize, level: f32, input: &[f32]) {
-            let params = [
-                ParamValue::Number(sweep_ms),
-                ParamValue::Choice(trigger),
-                ParamValue::Number(level),
-                ParamValue::Toggle(self.interpolation),
-            ];
-            let inputs = [RawBuffer::input(input)];
-            let sinks = [RawPlotSink {
-                ctx: std::ptr::from_mut(&mut self.frames).cast(),
-                publish: record,
-            }];
-            // SAFETY: a mono input of `input.len()` frames, as the spec wants; the sink
-            // writes to `frames`, which outlives the call and nothing else touches.
-            let mut io = unsafe {
-                ProcessIo::from_raw(input.len(), &self.spec, &params, &inputs, &[])
-                    .with_plots(&sinks)
-            };
-            self.processor.process(&mut io).unwrap();
-        }
+    /// An oscilloscope at [`RATE`], sweeping `sweep_ms`, started by `trigger` through
+    /// 0 V.
+    fn oscilloscope(sweep_ms: f32, trigger: usize) -> Harness {
+        Harness::new(&Oscilloscope)
+            .sample_rate(RATE)
+            .with(SWEEP, sweep_ms)
+            .with(TRIGGER, trigger)
     }
 
     /// A triangle wave within ±1, `period` frames long, starting at -1.
@@ -416,14 +364,15 @@ mod tests {
 
     #[test]
     fn a_sweep_starts_at_the_trigger_and_lasts_the_set_time() {
-        let mut bench = Bench::new();
+        let mut oscilloscope = oscilloscope(1.0, RISING);
 
         // 1 ms is 1000 frames: fewer than twice the stretches, so nothing is reduced.
-        bench.run(1.0, 1, 0.0, &triangle(400, 1500));
+        oscilloscope.run(&[&triangle(400, 1500)]);
 
-        let (x_step, points, _) = &bench.frames[0];
+        let frame = &oscilloscope.plotted(SCREEN)[0];
+        let points = frame.samples();
         assert_eq!(points.len(), 1000);
-        assert!((x_step - 1.0 / RATE).abs() < 1e-9);
+        assert!((frame.x_step - 1.0 / RATE).abs() < 1e-9);
         // The triangle rises through 0 V a quarter of a period in.
         assert_eq!(points[0], 0.0);
         assert!(points[1] > 0.0);
@@ -431,62 +380,76 @@ mod tests {
 
     #[test]
     fn a_falling_trigger_starts_on_the_way_down() {
-        let mut bench = Bench::new();
+        let mut oscilloscope = oscilloscope(1.0, FALLING);
 
-        bench.run(1.0, 2, 0.0, &triangle(400, 1800));
+        oscilloscope.run(&[&triangle(400, 1800)]);
 
-        let points = &bench.frames[0].1;
+        let points = oscilloscope.plotted(SCREEN)[0].samples();
         assert_eq!(points[0], 0.0);
         assert!(points[1] < 0.0);
     }
 
     #[test]
+    fn the_level_moves_the_trigger() {
+        let mut oscilloscope = oscilloscope(1.0, RISING).with(LEVEL, 0.5);
+
+        oscilloscope.run(&[&triangle(400, 1500)]);
+
+        let points = oscilloscope.plotted(SCREEN)[0].samples();
+        assert_eq!(points[0], 0.5);
+        assert!(points[1] > 0.5);
+    }
+
+    #[test]
     fn without_a_trigger_it_starts_anyway() {
-        let mut bench = Bench::new();
+        let mut oscilloscope = oscilloscope(1.0, RISING);
 
-        bench.run(1.0, 1, 0.0, &[0.5; 2100]);
+        oscilloscope.run(&[&[0.5; 2100]]);
 
-        assert_eq!(bench.frames.len(), 1, "after one sweep of waiting");
-        assert!(bench.frames[0].1.iter().all(|&point| point == 0.5));
+        let plotted = oscilloscope.plotted(SCREEN);
+        assert_eq!(plotted.len(), 1, "after one sweep of waiting");
+        assert!(plotted[0].samples().iter().all(|&point| point == 0.5));
     }
 
     #[test]
     fn sweeps_continue_across_blocks() {
-        let mut bench = Bench::new();
+        let mut oscilloscope = oscilloscope(1.0, RISING);
         let signal = triangle(400, 1500);
 
         for block in signal.chunks(64) {
-            bench.run(1.0, 1, 0.0, block);
+            oscilloscope.run(&[block]);
         }
 
-        assert_eq!(bench.frames.len(), 1);
-        assert_eq!(bench.frames[0].1.len(), 1000);
+        let plotted = oscilloscope.plotted(SCREEN);
+        assert_eq!(plotted.len(), 1);
+        assert_eq!(plotted[0].samples().len(), 1000);
     }
 
     #[test]
     fn a_long_sweep_is_reduced_and_keeps_its_peaks() {
-        let mut bench = Bench::new();
         // 10 ms, free run: 10 000 frames, one short spike in the middle.
+        let mut oscilloscope = oscilloscope(10.0, FREE_RUN);
         let mut signal = vec![0.0; 10_001];
         signal[5000] = 3.0;
 
-        bench.run(10.0, 0, 0.0, &signal);
+        oscilloscope.run(&[&signal]);
 
-        let (x_step, points, _) = &bench.frames[0];
+        let frame = &oscilloscope.plotted(SCREEN)[0];
+        let points = frame.samples();
         assert!(points.len() <= MAX_POINTS, "{}", points.len());
         assert!(points.len() < 10_000);
         assert!(points.contains(&3.0), "the spike survives");
-        let duration = x_step * points.len() as f32;
+        let duration = frame.x_step * points.len() as f32;
         assert!((duration - 0.01).abs() < 1e-5, "{duration}");
     }
 
     #[test]
     fn only_sweeps_of_samples_are_interpolated_and_only_when_asked() {
         let trace = |interpolation: bool, sweep_ms: f32| {
-            let mut bench = Bench::new();
-            bench.interpolation = interpolation;
-            bench.run(sweep_ms, 0, 0.0, &vec![0.0; 10_001]);
-            PlotTrace::from_code(bench.frames[0].2)
+            let mut oscilloscope =
+                oscilloscope(sweep_ms, FREE_RUN).with(INTERPOLATION, interpolation);
+            oscilloscope.run(&[&vec![0.0; 10_001]]);
+            oscilloscope.plotted(SCREEN)[0].trace
         };
 
         assert_eq!(trace(false, 1.0), Some(PlotTrace::Lines));
@@ -512,30 +475,32 @@ mod tests {
 
     #[test]
     fn a_changed_sweep_time_starts_over() {
-        let mut bench = Bench::new();
-        bench.run(1.0, 0, 0.0, &[1.0; 500]);
+        let mut oscilloscope = oscilloscope(1.0, FREE_RUN);
+        oscilloscope.run(&[&[1.0; 500]]);
 
-        bench.run(0.5, 0, 0.0, &[2.0; 500]);
+        oscilloscope.set(SWEEP, 0.5).run(&[&[2.0; 500]]);
 
-        assert_eq!(bench.frames.len(), 1);
-        assert_eq!(bench.frames[0].1, [2.0; 500], "nothing of the old sweep");
+        let plotted = oscilloscope.plotted(SCREEN);
+        assert_eq!(plotted.len(), 1);
+        assert_eq!(plotted[0].samples(), [2.0; 500], "nothing of the old sweep");
     }
 
     #[test]
     fn reset_drops_the_sweep_in_progress() {
-        let mut bench = Bench::new();
-        bench.run(1.0, 0, 0.0, &[1.0; 999]);
+        let mut oscilloscope = oscilloscope(1.0, FREE_RUN);
+        oscilloscope.run(&[&[1.0; 999]]);
 
-        bench.processor.reset();
-        bench.run(1.0, 0, 0.0, &[2.0; 1000]);
+        oscilloscope.reset();
+        oscilloscope.run(&[&[2.0; 1000]]);
 
-        assert_eq!(bench.frames.len(), 1);
-        assert!(bench.frames[0].1.iter().all(|&point| point == 2.0));
+        let plotted = oscilloscope.plotted(SCREEN);
+        assert_eq!(plotted.len(), 1);
+        assert!(plotted[0].samples().iter().all(|&point| point == 2.0));
     }
 
     #[test]
     fn needs_a_valid_sample_rate() {
-        let mut processor = Oscilloscope.create_processor();
-        assert!(processor.prepare(0.0, 16).is_err());
+        let mut oscilloscope = oscilloscope(1.0, FREE_RUN).sample_rate(0.0);
+        assert!(oscilloscope.process(1, &[&[0.0]]).is_err());
     }
 }

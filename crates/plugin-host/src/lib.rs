@@ -201,10 +201,11 @@ fn guarded<T>(call: impl FnOnce() -> T, what: impl FnOnce() -> String) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use v_signal_nodes_core::{NodeKind, NodeSocket, NumberParam, ParamValue, Unit};
-    use v_signal_nodes_plugin_api::{
-        PlotTrace, PluginError, ProcessIo, RawBuffer, RawPlotSink, ffi,
+    use v_signal_nodes_core::{
+        ChoiceParam, NodeKind, NodeSocket, NumberParam, ParamValue, PlotWindow, ToggleParam, Unit,
     };
+    use v_signal_nodes_plugin_api::testing::Harness;
+    use v_signal_nodes_plugin_api::{PlotTrace, PluginError, ProcessIo, ffi};
 
     const GAIN: NumberParam = NumberParam("gain");
 
@@ -272,39 +273,19 @@ mod tests {
         }
     }
 
-    /// Runs a one-input, one-output processor over `input`.
-    fn run(
-        processor: &mut dyn NodeProcessor,
-        params: &[ParamValue],
-        input: &[f32],
-    ) -> Result<Vec<f32>, PluginError> {
-        let spec = Gain.spec();
-        let mut output = vec![0.0; input.len()];
-        let inputs = [RawBuffer::input(input)];
-        let outputs = [RawBuffer::output(&mut output)];
-        // SAFETY: the spec has one mono input and output, both buffers are
-        // `input.len()` long, live for the call and don't overlap.
-        let mut io = unsafe { ProcessIo::from_raw(input.len(), &spec, params, &inputs, &outputs) };
-        processor.process(&mut io)?;
-        Ok(output)
-    }
-
-    /// Drives `processor` through its whole life cycle.
-    fn check_life_cycle(processor: &mut dyn NodeProcessor) {
-        let params = [ParamValue::Number(2.0)];
-        assert_eq!(
-            run(processor, &params, &[1.0]).unwrap_err().message(),
-            "not prepared"
-        );
-        processor.prepare(48_000.0, 64).unwrap();
-        assert_eq!(run(processor, &params, &[1.0, -0.5]).unwrap(), [3.0, 0.0]);
-        processor.reset();
-        assert_eq!(run(processor, &params, &[1.0, -0.5]).unwrap(), [2.0, -1.0]);
-        let half = [ParamValue::Number(0.5)];
-        assert_eq!(run(processor, &half, &[1.0]).unwrap(), [0.5]);
+    /// Drives `processor`, one of a [`Gain`] node, through its whole life cycle.
+    fn check_life_cycle(processor: Box<dyn NodeProcessor>) {
+        let mut gain = Harness::from_parts(Gain.spec(), processor).without_prepare();
+        let error = gain.process(1, &[&[1.0]]).unwrap_err();
+        assert_eq!(error.message(), "not prepared");
+        gain.prepare().unwrap();
+        assert_eq!(gain.run(&[&[1.0, -0.5]]), [[3.0, 0.0]]);
+        gain.reset();
+        assert_eq!(gain.run(&[&[1.0, -0.5]]), [[2.0, -1.0]]);
+        assert_eq!(gain.set(GAIN, 0.5).run(&[&[1.0]]), [[0.5]]);
         // A value of the wrong kind is an error, not a silent 0.0.
-        let wrong = [ParamValue::Toggle(true)];
-        assert!(run(processor, &wrong, &[1.0]).is_err());
+        gain.set_raw(GAIN.0, ParamValue::Toggle(true));
+        assert!(gain.process(1, &[&[1.0]]).is_err());
     }
 
     /// `test`, version 1.2.3, as the host lists it.
@@ -321,11 +302,11 @@ mod tests {
         host.load(&TestPlugin).unwrap();
 
         let node = host.build_node("test.gain").unwrap();
-        let mut processor = host.create_processor("test.gain").unwrap();
+        let processor = host.create_processor("test.gain").unwrap();
 
         assert_eq!(node.type_id(), "test.gain");
         assert!(Arc::ptr_eq(node.spec(), host.spec("test.gain").unwrap()));
-        check_life_cycle(processor.as_mut());
+        check_life_cycle(processor);
         assert_eq!(host.plugins(), [test_plugin()]);
         assert_eq!(host.plugin("test"), Some(&test_plugin()));
         assert_eq!(host.plugin_of("test.gain"), Some(&test_plugin()));
@@ -341,9 +322,9 @@ mod tests {
         host.load(&plugin).unwrap();
         drop(plugin);
 
-        let mut processor = host.create_processor("test.gain").unwrap();
+        let processor = host.create_processor("test.gain").unwrap();
 
-        check_life_cycle(processor.as_mut());
+        check_life_cycle(processor);
         assert_eq!(host.plugins(), [test_plugin()]);
     }
 
@@ -379,31 +360,6 @@ mod tests {
 
     #[test]
     fn plots_cross_the_c_abi() {
-        /// A frame: x step, its beams, trace code.
-        type Frame = (f32, Vec<Vec<f32>>, u8);
-
-        unsafe extern "C" fn record(
-            ctx: *mut std::ffi::c_void,
-            x_step: f32,
-            samples: *const f32,
-            len: usize,
-            beams: usize,
-            stride: usize,
-            trace: u8,
-        ) {
-            // SAFETY: the test passes its vector as `ctx`, and the plugin side `beams`
-            // valid slices of `len`, `stride` apart, all for the call.
-            unsafe {
-                let frames = &mut *ctx.cast::<Vec<Frame>>();
-                let beams = (0..beams)
-                    .map(|beam| {
-                        std::slice::from_raw_parts(samples.add(beam * stride), len).to_vec()
-                    })
-                    .collect();
-                frames.push((x_step, beams, trace));
-            }
-        }
-
         // SAFETY: as in `builds_a_working_node_through_the_c_abi`.
         let plugin = unsafe {
             DynamicPlugin::from_ffi(ffi::export(|| v_signal_nodes_plugin_std::StdPlugin), None)
@@ -412,35 +368,26 @@ mod tests {
         let mut host = PluginHost::new();
         host.load(&plugin).unwrap();
         let oscilloscope = v_signal_nodes_plugin_std::DUAL_BEAM_OSCILLOSCOPE;
-        let spec = Arc::clone(host.spec(oscilloscope).unwrap());
-        let mut processor = host.create_processor(oscilloscope).unwrap();
-        processor.prepare(1000.0, 64).unwrap();
-
-        let mut frames = Vec::<Frame>::new();
-        let sinks = [RawPlotSink {
-            ctx: std::ptr::from_mut(&mut frames).cast(),
-            publish: record,
-        }];
+        let spec = NodeSpec::clone(host.spec(oscilloscope).unwrap());
+        let processor = host.create_processor(oscilloscope).unwrap();
         // A sweep of 10 samples, free run, so the block holds one whole; interpolated.
-        let params = [
-            ParamValue::Number(10.0),
-            ParamValue::Choice(0),
-            ParamValue::Choice(0),
-            ParamValue::Number(0.0),
-            ParamValue::Toggle(true),
-        ];
-        let (first, second) = ([0.5; 10], [-2.0; 10]);
-        let inputs = [RawBuffer::input(&first), RawBuffer::input(&second)];
-        // SAFETY: two mono buffers of 10 frames, as the spec wants, and no outputs;
-        // the sink's vector outlives the call and nothing else touches it.
-        let mut io =
-            unsafe { ProcessIo::from_raw(10, &spec, &params, &inputs, &[]).with_plots(&sinks) };
-        processor.process(&mut io).unwrap();
+        let mut oscilloscope = Harness::from_parts(spec, processor)
+            .sample_rate(1000.0)
+            .with(NumberParam("sweep"), 10.0)
+            .with(ChoiceParam("trigger"), 0)
+            .with(ToggleParam("interpolation"), true);
 
-        assert_eq!(frames.len(), 1);
-        assert!((frames[0].0 - 0.001).abs() < 1e-6, "{}", frames[0].0);
-        assert_eq!(frames[0].1, [[0.5; 10], [-2.0; 10]]);
-        assert_eq!(frames[0].2, PlotTrace::Interpolated.code());
+        oscilloscope.run(&[&[0.5; 10], &[-2.0; 10]]);
+
+        let plotted = oscilloscope.plotted(PlotWindow("screen"));
+        assert_eq!(plotted.len(), 1);
+        assert!(
+            (plotted[0].x_step - 0.001).abs() < 1e-6,
+            "{}",
+            plotted[0].x_step
+        );
+        assert_eq!(plotted[0].beams, [[0.5; 10], [-2.0; 10]]);
+        assert_eq!(plotted[0].trace, Some(PlotTrace::Interpolated));
     }
 
     #[test]

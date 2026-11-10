@@ -48,6 +48,11 @@ const MAX_NODE_COUNT: usize = 512;
 pub struct VSignalNodesApp {
     /// The nodes (spec and parameter values) and their connections.
     graph: Graph,
+    /// Samples per second the graph runs at, within
+    /// [`SAMPLE_RATE_RANGE`](crate::document::SAMPLE_RATE_RANGE): a project setting,
+    /// saved with the graph; a device at another rate gets it resampled. Changed
+    /// through [`set_sample_rate`](Self::set_sample_rate).
+    sample_rate: u32,
     /// Top-left corner of every node in canvas coordinates; never negative.
     positions: HashMap<NodeId, egui::Pos2>,
     /// Every node in paint order: later nodes are drawn on top and win
@@ -109,6 +114,7 @@ impl Default for VSignalNodesApp {
         let palette = palette(&plugins);
         Self {
             graph: Graph::new(),
+            sample_rate: crate::document::DEFAULT_SAMPLE_RATE,
             positions: HashMap::new(),
             z_order: Vec::new(),
             node_limit_reached: false,
@@ -498,7 +504,8 @@ impl eframe::App for VSignalNodesApp {
 mod tests {
     use super::*;
     use v_signal_nodes_plugin_std::{
-        AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOGRAPH, SUMMING_AMPLIFIER,
+        AMPLIFIER, DEVICE_OUTPUT, DUAL_BEAM_OSCILLOSCOPE, GENERATOR, OSCILLOSCOPE,
+        SUMMING_AMPLIFIER,
     };
 
     /// Adds a node of type `type_id` at `pos` (or the nearest free spot).
@@ -719,8 +726,8 @@ mod tests {
     fn windows_open_close_and_go_with_their_node() {
         use NodeWindow::{AdvancedParams, Preview, Separate};
         let mut app = VSignalNodesApp::default();
-        let first = add(&mut app, OSCILLOGRAPH, egui::Pos2::ZERO);
-        let second = add(&mut app, OSCILLOGRAPH, egui::pos2(300.0, 0.0));
+        let first = add(&mut app, OSCILLOSCOPE, egui::Pos2::ZERO);
+        let second = add(&mut app, OSCILLOSCOPE, egui::pos2(300.0, 0.0));
 
         app.toggle_window(first, AdvancedParams);
         app.toggle_window(first, Preview(0));
@@ -928,7 +935,8 @@ mod tests {
                 AMPLIFIER,
                 SUMMING_AMPLIFIER,
                 DEVICE_OUTPUT,
-                OSCILLOGRAPH
+                DUAL_BEAM_OSCILLOSCOPE,
+                OSCILLOSCOPE
             ]
         );
     }
@@ -936,14 +944,14 @@ mod tests {
     #[test]
     fn nodes_are_built_by_core_and_placed() {
         let mut app = VSignalNodesApp::default();
-        let kind = app.kind_of(OSCILLOGRAPH).unwrap();
+        let kind = app.kind_of(OSCILLOSCOPE).unwrap();
 
         let id = app.add_node_at(kind.clone(), egui::Pos2::ZERO).unwrap();
 
         assert_eq!(app.z_order, [id]);
         assert_eq!(id.index(), 0);
         let node = app.node(id).unwrap();
-        assert_eq!(node.node.type_id(), OSCILLOGRAPH);
+        assert_eq!(node.node.type_id(), OSCILLOSCOPE);
         // The same size as the palette preview, which only has the spec.
         assert_eq!(node.rect().size(), ui::node_size(kind.spec()));
     }

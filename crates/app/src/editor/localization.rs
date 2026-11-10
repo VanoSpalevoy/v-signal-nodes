@@ -44,6 +44,9 @@ pub(super) enum Text {
     RunningOnePass,
     OnePassResult,
     RunFailed,
+    SampleRate,
+    FewSamplesPerPeriod,
+    UnitHertz,
     SnapToGrid,
     Scale,
     // Menu bar titles and commands (see `commands`).
@@ -68,6 +71,7 @@ pub(super) enum Text {
     PlotPeakToPeak,
     UnitSeconds,
     UnitVolts,
+    UnitDegrees,
     PrefixNano,
     PrefixMicro,
     PrefixMilli,
@@ -134,6 +138,11 @@ impl Language {
             (Self::English, Text::RunningOnePass) => "Running once…",
             (Self::English, Text::OnePassResult) => "Run once: frames / time / peak",
             (Self::English, Text::RunFailed) => "Run failed",
+            (Self::English, Text::SampleRate) => "Sample rate",
+            (Self::English, Text::FewSamplesPerPeriod) => {
+                "few samples per period, raise the sample rate to at least"
+            }
+            (Self::English, Text::UnitHertz) => "Hz",
             (Self::English, Text::SnapToGrid) => "Snap to grid",
             (Self::English, Text::Scale) => "Scale",
             (Self::English, Text::MenuEdit) => "Edit",
@@ -155,6 +164,7 @@ impl Language {
             (Self::English, Text::PlotPeakToPeak) => "p-p",
             (Self::English, Text::UnitSeconds) => "s",
             (Self::English, Text::UnitVolts) => "V",
+            (Self::English, Text::UnitDegrees) => "°",
             (Self::English, Text::PrefixNano) => "n",
             (Self::English, Text::PrefixMicro) => "µ",
             (Self::English, Text::PrefixMilli) => "m",
@@ -186,6 +196,11 @@ impl Language {
             (Self::Russian, Text::RunningOnePass) => "Однократный запуск…",
             (Self::Russian, Text::OnePassResult) => "Однократный запуск: отсчёты / время / пик",
             (Self::Russian, Text::RunFailed) => "Ошибка запуска",
+            (Self::Russian, Text::SampleRate) => "Частота отсчётов",
+            (Self::Russian, Text::FewSamplesPerPeriod) => {
+                "мало отсчётов на период, поднимите частоту отсчётов хотя бы до"
+            }
+            (Self::Russian, Text::UnitHertz) => "Гц",
             (Self::Russian, Text::SnapToGrid) => "Привязать к сетке",
             (Self::Russian, Text::Scale) => "Масштаб",
             (Self::Russian, Text::MenuEdit) => "Правка",
@@ -207,6 +222,7 @@ impl Language {
             (Self::Russian, Text::PlotPeakToPeak) => "размах",
             (Self::Russian, Text::UnitSeconds) => "с",
             (Self::Russian, Text::UnitVolts) => "В",
+            (Self::Russian, Text::UnitDegrees) => "°",
             (Self::Russian, Text::PrefixNano) => "н",
             (Self::Russian, Text::PrefixMicro) => "мк",
             (Self::Russian, Text::PrefixMilli) => "м",

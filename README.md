@@ -58,6 +58,12 @@ bits are planned.
   fit (different rates, or channel counts that differ with neither side mono)
   are refused, each input has at most one source, and the bottom panel shows why
   a connection was refused.
+- **A sample rate of the project's choosing.** The graph runs at a rate chosen for
+  its signals (44.1 kHz to 384 kHz in a list, any from 1 kHz to 10 MHz typed in),
+  not the device's: the output is resampled to the device's rate, with the band above
+  its half filtered out. The rate is saved with the graph. A node frequency above a
+  quarter of the sample rate gets a warning in the bottom panel, with the rate it
+  needs.
 - **Plugins.** Rust crates linked into the editor, or dynamic libraries loaded
   through a C ABI, with an API version check and panics caught at the boundary.
 - **Two languages.** An English or Russian interface. Plugins translate their
@@ -73,9 +79,11 @@ bits are planned.
   offset; generators of one frequency keep their set phases, so 0° and 180° add up
   to zero), `std.amplifier` (inverting if negative, with optional clipping at its
   supply), `std.summing_amplifier` (sums its inputs sample by sample),
-  `std.device_output` (1 V is the device's full scale) and `std.oscillograph` (a
-  triggered sweep on a screen in its window; it needs no output node and nothing it
-  looks at is heard).
+  `std.device_output` (1 V is the device's full scale), `std.oscilloscope` (a
+  triggered sweep on a screen in its window, optionally interpolated by sin(x)/x like
+  on a digital oscilloscope; it needs no output node and nothing it looks at is
+  heard) and `std.dual_beam_oscilloscope` (the same with two inputs on one screen, in
+  two colors with numbered markers, one sweep triggered by the input you choose).
 
 ## Getting started
 
@@ -109,7 +117,7 @@ sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev lib
 | Change a choice or a toggle  | Click it on the node                                   |
 | Advanced parameters          | The `⋯` button in the header opens them in a window    |
 | Clear the selection          | Click empty canvas or press `Esc`                      |
-| Zoom, snap to grid, language | Toolbar                                                |
+| Zoom, snap to grid, sample rate, language | Toolbar                                   |
 
 Each input takes one connection. Connecting an input that is already connected
 replaces its old connection. The bottom panel lists the connections and shows
@@ -230,7 +238,9 @@ export_plugin!(MyPlugin);
   `ToggleParam`) that build the `ParamSpec` and read the value with
   `io.get(KEY)`, so the id and kind can't drift apart. The editor shows a parameter
   on the node, or in the node's separate window if its spec is marked
-  `.advanced()`.
+  `.advanced()`. A number can name its unit, `.unit(Unit::Hertz)`: the editor
+  then knows a frequency when it sees one and warns when it is set above a quarter of
+  the sample rate.
 - **Labels are written in English in the spec.** Translations are keyed by
   `TextKey`: the node name, a socket by index, a parameter by id, or a choice
   option by parameter id and index. That way, renaming the English label keeps
@@ -264,6 +274,10 @@ already load a dynamic library, but the editor doesn't call it yet.
 - [x] CI on Linux, macOS and Windows
 - [x] Graph in `core` with connection checks and generational node ids
 - [x] Graph runtime: real-time processing and an offline pass
+- [x] Output to the system's default device
+- [x] Project sample rate apart from the device's, with resampled output
+- [x] Node windows drawn by the editor: plots, single- and dual-beam oscilloscopes
+- [x] Parameter units, warning about too few samples per period
 - [ ] Sample formats beyond real numbers: complex (IQ) and digital (bits)
 - [ ] Different sample rates in one graph (decimation, interpolation)
 - [ ] Device and file I/O: SDRs, ADCs/DACs, sound cards, signal files (SigMF)

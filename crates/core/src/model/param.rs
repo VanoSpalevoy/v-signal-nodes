@@ -17,7 +17,7 @@
 //! ```
 
 use crate::ParamProblem;
-use crate::model::TextKey;
+use crate::model::{TextKey, Unit};
 
 /// What values a parameter takes, with its default.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +44,11 @@ pub struct ParamSpec {
     /// Not everyday: an editor keeps it out of the way, in a separate window instead
     /// of on the node. Set with [`advanced`](Self::advanced).
     pub advanced: bool,
+    /// What a number parameter is measured in, if anything. Set with
+    /// [`unit`](Self::unit). The name still says it for people ("Frequency, Hz"); this
+    /// is for an editor: a parameter in [`Unit::Hertz`] is a frequency it can compare
+    /// with the sample rate.
+    pub unit: Option<Unit>,
 }
 
 /// Current value of a parameter.
@@ -217,6 +222,7 @@ impl ParamSpec {
             name: name.into(),
             kind,
             advanced: false,
+            unit: None,
         }
     }
 
@@ -224,6 +230,13 @@ impl ParamSpec {
     #[must_use]
     pub fn advanced(mut self) -> Self {
         self.advanced = true;
+        self
+    }
+
+    /// This parameter, measured in `unit`; only for numbers.
+    #[must_use]
+    pub fn unit(mut self, unit: Unit) -> Self {
+        self.unit = Some(unit);
         self
     }
 
@@ -249,7 +262,8 @@ impl ParamSpec {
     }
 
     /// Checks the id and name aren't empty, a number range is finite and
-    /// ordered, a choice has options, and the default is accepted.
+    /// ordered, a choice has options, only a number has a unit, and the default is
+    /// accepted.
     pub fn validate(&self) -> Result<(), ParamProblem> {
         if self.id.trim().is_empty() {
             return Err(ParamProblem::EmptyId);
@@ -266,6 +280,9 @@ impl ParamSpec {
             && options.is_empty()
         {
             return Err(ParamProblem::NoOptions);
+        }
+        if self.unit.is_some() && !matches!(self.kind, ParamKind::Number { .. }) {
+            return Err(ParamProblem::UnitOfNonNumber);
         }
         if !self.accepts(self.default_value()) {
             return Err(ParamProblem::DefaultOutOfRange);
@@ -297,6 +314,18 @@ mod tests {
         let gain = NumberParam("gain").spec("Gain", 0.0, 2.0, 1.0);
         assert!(!gain.advanced);
         assert!(gain.advanced().advanced);
+    }
+
+    #[test]
+    fn only_numbers_have_units() {
+        let frequency = NumberParam("frequency").spec("Frequency", 1.0, 10.0, 1.0);
+        assert_eq!(frequency.unit, None);
+        let frequency = frequency.unit(Unit::Hertz);
+        assert_eq!(frequency.unit, Some(Unit::Hertz));
+        assert!(frequency.validate().is_ok());
+
+        let on = ToggleParam("on").spec("On", true).unit(Unit::Volts);
+        assert_eq!(on.validate(), Err(ParamProblem::UnitOfNonNumber));
     }
 
     #[test]

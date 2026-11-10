@@ -8,11 +8,15 @@
 //! document (`VSignalNodesApp::to_document` / `open_document`) and checks the
 //! plugins and every graph rule there; this module only checks the format.
 //!
+//! The sample rate the graph runs at is the document's too: it's chosen for the
+//! signals, not for a device.
+//!
 //! On disk a document is pretty-printed JSON:
 //!
 //! ```json
 //! {
 //!   "version": 1,
+//!   "sample_rate": 48000,
 //!   "used_plugins": ["std"],
 //!   "nodes": [
 //!     { "id": 0, "type_id": "std.amplifier", "pos": [40.0, 60.0], "params": { "gain": { "number": 0.5 } } }
@@ -29,6 +33,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +48,16 @@ pub(crate) const FORMAT_VERSION: u32 = 1;
 /// stay exact to well under a canvas unit.
 const MAX_COORDINATE: f32 = 1_000_000.0;
 
+/// Sample rate of a new graph, and of a document that doesn't say, in Hz.
+pub(crate) const DEFAULT_SAMPLE_RATE: u32 = 48_000;
+/// Sample rates a graph may run at, in Hz: from slow signals to radio ones. Whether
+/// a high one runs in real time is up to the machine.
+pub(crate) const SAMPLE_RATE_RANGE: RangeInclusive<u32> = 1_000..=10_000_000;
+
+fn default_sample_rate() -> u32 {
+    DEFAULT_SAMPLE_RATE
+}
+
 /// Why a document can't be read or opened.
 #[derive(Debug)]
 pub(crate) enum DocumentError {
@@ -52,6 +67,8 @@ pub(crate) enum DocumentError {
     Malformed(serde_json::Error),
     /// Written by a build with another [`FORMAT_VERSION`].
     UnsupportedVersion(u32),
+    /// The sample rate is outside [`SAMPLE_RATE_RANGE`].
+    UnsupportedSampleRate(u32),
     /// A node's position or parameter isn't finite.
     NonFiniteNumber { node: usize },
     /// A node lies beyond [`MAX_COORDINATE`].
@@ -83,6 +100,12 @@ impl fmt::Display for DocumentError {
             Self::UnsupportedVersion(version) => write!(
                 f,
                 "unsupported document version {version} (expected {FORMAT_VERSION})"
+            ),
+            Self::UnsupportedSampleRate(rate) => write!(
+                f,
+                "sample rate {rate} Hz is outside {}..={} Hz",
+                SAMPLE_RATE_RANGE.start(),
+                SAMPLE_RATE_RANGE.end()
             ),
             Self::NonFiniteNumber { node } => write!(f, "node {node} has a non-finite number"),
             Self::TooFarAway { node } => {
@@ -128,6 +151,9 @@ impl From<io::Error> for DocumentError {
 pub(crate) struct Document {
     /// File format version, [`FORMAT_VERSION`] when written by this build.
     pub version: u32,
+    /// Samples per second the graph runs at, within [`SAMPLE_RATE_RANGE`].
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: u32,
     /// Names of the plugins whose node types the document uses, sorted. Checked
     /// on load before any node is built, so a missing plugin is reported by name.
     /// (Plugins have no versions yet; when they do, they go here too.)
@@ -171,6 +197,7 @@ impl Document {
     /// (paint order); `used_plugins` and `connections` are sorted here, plugins
     /// also deduplicated.
     pub(crate) fn new(
+        sample_rate: u32,
         mut used_plugins: Vec<String>,
         nodes: Vec<DocNode>,
         mut connections: Vec<DocConnection>,
@@ -180,6 +207,7 @@ impl Document {
         connections.sort_unstable();
         Self {
             version: FORMAT_VERSION,
+            sample_rate,
             used_plugins,
             nodes,
             connections,
@@ -194,13 +222,17 @@ impl Document {
     }
 
     /// Parses a document from JSON. Refuses malformed JSON, unknown fields,
-    /// unsupported format versions, non-finite positions or numbers and positions
-    /// beyond [`MAX_COORDINATE`]. Plugins and graph rules (known types, sockets,
-    /// cycles) are checked by the editor.
+    /// unsupported format versions, sample rates outside [`SAMPLE_RATE_RANGE`],
+    /// non-finite positions or numbers and positions beyond [`MAX_COORDINATE`].
+    /// Plugins and graph rules (known types, sockets, cycles) are checked by the
+    /// editor.
     pub(crate) fn from_json(json: &str) -> Result<Self, DocumentError> {
         let document: Self = serde_json::from_str(json).map_err(DocumentError::Malformed)?;
         if document.version != FORMAT_VERSION {
             return Err(DocumentError::UnsupportedVersion(document.version));
+        }
+        if !SAMPLE_RATE_RANGE.contains(&document.sample_rate) {
+            return Err(DocumentError::UnsupportedSampleRate(document.sample_rate));
         }
         for node in &document.nodes {
             let numbers = node.params.values().filter_map(|value| match value {
@@ -253,6 +285,7 @@ mod tests {
 
     fn sample() -> Document {
         Document::new(
+            96_000,
             vec!["std".into(), "stub".into(), "std".into()],
             vec![
                 DocNode {
@@ -308,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn params_and_plugins_may_be_omitted() {
+    fn params_plugins_and_the_sample_rate_may_be_omitted() {
         let json = r#"{
             "version": 1,
             "nodes": [
@@ -318,6 +351,7 @@ mod tests {
             "connections": []
         }"#;
         let document = Document::from_json(json).unwrap();
+        assert_eq!(document.sample_rate, DEFAULT_SAMPLE_RATE);
         assert!(document.used_plugins.is_empty());
         assert_eq!(document.nodes[0].params["gain"], ParamValue::Number(2.0));
         assert!(document.nodes[1].params.is_empty());
@@ -348,6 +382,14 @@ mod tests {
             Document::from_json(r#"{ "version": 2, "nodes": [], "connections": [] }"#),
             Err(DocumentError::UnsupportedVersion(2))
         ));
+        for rate in [0, 999, 10_000_001] {
+            assert!(matches!(
+                Document::from_json(&format!(
+                    r#"{{ "version": 1, "sample_rate": {rate}, "nodes": [], "connections": [] }}"#
+                )),
+                Err(DocumentError::UnsupportedSampleRate(r)) if r == rate
+            ));
+        }
         assert!(matches!(
             Document::from_json(
                 r#"{ "version": 1, "connections": [],

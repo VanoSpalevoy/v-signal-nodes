@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use eframe::egui;
-use v_signal_nodes_core::{AxisUnit, NodeId, WindowContent};
+use v_signal_nodes_core::{NodeId, Unit, WindowContent};
 
 use super::{NodeWidget, NodeWindow, PANEL_BG, header_fill, panel_frame, params, plot};
 use crate::editor::execution::{PlotFeed, read_feed};
@@ -166,8 +166,8 @@ fn window_title(node: &NodeWidget, kind: NodeWindow, language: Language) -> Stri
 /// What a plot's window draws, wherever it is.
 struct PlotContents {
     feed: Option<PlotFeed>,
-    x: AxisUnit,
-    y: AxisUnit,
+    x: Unit,
+    y: Unit,
     language: Language,
 }
 
@@ -239,7 +239,7 @@ mod tests {
     use crate::editor::ui::headless::{self, Frames};
     use crate::editor::ui::{install_theme, render};
     use v_signal_nodes_core::{NodeId, ParamValue};
-    use v_signal_nodes_plugin_std::OSCILLOGRAPH;
+    use v_signal_nodes_plugin_std::OSCILLOSCOPE;
 
     /// The editor without a window: whole frames, with pointer events.
     struct Editor {
@@ -248,13 +248,13 @@ mod tests {
     }
 
     impl Editor {
-        /// An editor with an oscillograph, its window `kind` opened with the pointer
+        /// An editor with an oscilloscope, its window `kind` opened with the pointer
         /// at `at`.
         fn with_window(at: egui::Pos2, kind: NodeWindow) -> (Self, NodeId) {
             let frames = Frames::new();
             install_theme(&frames.ctx);
             let mut app = VSignalNodesApp::default();
-            let scope = add(&mut app, OSCILLOGRAPH, egui::pos2(500.0, 300.0));
+            let scope = add(&mut app, OSCILLOSCOPE, egui::pos2(500.0, 300.0));
             let mut editor = Self { frames, app };
             editor.frame(vec![egui::Event::PointerMoved(at)]);
             editor.app.toggle_window(scope, kind);

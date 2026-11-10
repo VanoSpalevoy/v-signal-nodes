@@ -14,7 +14,7 @@ use std::f64::consts::TAU;
 
 use v_signal_nodes_plugin_api::{
     ChoiceParam, NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, NumberParam,
-    ParamKey, PluginError, ProcessIo, TextKey,
+    ParamKey, PluginError, ProcessIo, TextKey, Unit,
 };
 
 use crate::GENERATOR;
@@ -39,10 +39,23 @@ impl NodeProvider for Generator {
         NodeSpec::new(GENERATOR, "Generator", NodeKind::Generator)
             .output(NodeSocket::signal_out("Out"))
             .param(WAVEFORM.spec("Waveform", WAVEFORMS, 0))
-            .param(FREQUENCY.spec("Frequency, Hz", 0.1, 1_000_000.0, 1000.0))
-            .param(AMPLITUDE.spec("Amplitude, V", 0.0, 1000.0, 1.0))
-            .param(PHASE.spec("Phase, °", 0.0, 360.0, 0.0))
-            .param(OFFSET.spec("Offset, V", -1000.0, 1000.0, 0.0).advanced())
+            .param(
+                FREQUENCY
+                    .spec("Frequency, Hz", 0.1, 1_000_000.0, 1000.0)
+                    .unit(Unit::Hertz),
+            )
+            .param(
+                AMPLITUDE
+                    .spec("Amplitude, V", 0.0, 1000.0, 1.0)
+                    .unit(Unit::Volts),
+            )
+            .param(PHASE.spec("Phase, °", 0.0, 360.0, 0.0).unit(Unit::Degrees))
+            .param(
+                OFFSET
+                    .spec("Offset, V", -1000.0, 1000.0, 0.0)
+                    .unit(Unit::Volts)
+                    .advanced(),
+            )
             .translate(
                 "ru",
                 [

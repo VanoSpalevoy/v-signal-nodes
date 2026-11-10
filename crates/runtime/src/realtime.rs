@@ -19,6 +19,9 @@
 //! and a caught panic allocates, but after that the [`Renderer`] outputs silence
 //! until the next engine, so that happens once.
 //!
+//! A failed processor doesn't go on to the next engine: its state may be what made
+//! it fail, so the [`Controller`] creates its node a new one with the next plan.
+//!
 //! Output nodes: every input of every output node is summed into the device's
 //! channels ([`mix_into`]); the sum is limited to `-1.0..=1.0`, what a device takes.
 //! Control-rate inputs aren't delivered, they have no samples.
@@ -26,6 +29,7 @@
 //! The device backend lives outside this crate, as a driver calling
 //! [`Renderer::render`], so all of this is testable offline.
 
+use std::collections::HashMap;
 use std::fmt::Display;
 
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -64,7 +68,12 @@ pub enum Event {
     /// A `Replace` or `Clear` took effect; the engine it replaced, if any, to drop.
     Replaced(Option<Box<Engine>>),
     /// The running engine failed; the output is silent until the next `Replace`.
-    Failed(RuntimeError),
+    Failed {
+        /// Which engine failed: the number of `Replace`s and `Clear`s applied before
+        /// it, so a failure of an engine already replaced can be told apart.
+        engine: u64,
+        error: RuntimeError,
+    },
 }
 
 /// Creates the two ends of a real-time run at `sample_rate`, in blocks of at most
@@ -79,12 +88,17 @@ pub fn channel(sample_rate: f32, max_frames: usize) -> (Controller, Renderer) {
         sample_rate,
         max_frames,
         running: Vec::new(),
+        failed: Vec::new(),
+        replaces_sent: 0,
+        created_for: HashMap::new(),
         replaces_in_flight: 0,
     };
     let renderer = Renderer {
         commands: command_queue,
         events: event_queue,
+        sample_rate,
         engine: None,
+        replaces_applied: 0,
         failed: false,
     };
     (controller, renderer)
@@ -98,6 +112,16 @@ pub struct Controller {
     max_frames: usize,
     /// The nodes of the last engine sent, in step order: what the next one replaces.
     running: Vec<NodeId>,
+    /// Nodes whose current processor failed, each once: the next engine creates them
+    /// new processors instead of taking the old ones over.
+    failed: Vec<NodeId>,
+    /// `Replace`s and `Clear`s sent so far: the number of the last engine sent, as the
+    /// renderer counts them in [`Event::Failed`].
+    replaces_sent: u64,
+    /// For every node of `running`, the number of the engine its current processor was
+    /// created for; it has been carried over since. A failure reported by an older
+    /// engine was of a processor already replaced.
+    created_for: HashMap<NodeId, u64>,
     /// `Replace`s and `Clear`s sent and not answered yet.
     replaces_in_flight: usize,
 }
@@ -105,6 +129,7 @@ pub struct Controller {
 impl Controller {
     /// Runs `plan` from the next block on: processors of nodes already running move
     /// over with their state, `make` creates the others, and they are prepared here.
+    /// Nodes whose processor failed (as [`poll`](Self::poll) learned) get new ones.
     /// Fails, with the old plan still running, if a processor can't be created or
     /// prepared. [`RuntimeError::Busy`] means nothing was sent: try again after
     /// [`poll`](Self::poll).
@@ -116,7 +141,14 @@ impl Controller {
         if !self.can_replace() {
             return Err(RuntimeError::Busy);
         }
-        let fresh = processors_for(&plan, &self.running, make)?;
+        let keep: Vec<NodeId> = self
+            .running
+            .iter()
+            .filter(|node| !self.failed.contains(node))
+            .copied()
+            .collect();
+        let fresh = processors_for(&plan, &keep, make)?;
+        let made: Vec<NodeId> = fresh.keys().copied().collect();
         let nodes = step_nodes(&plan);
         let engine = Engine::successor(
             plan,
@@ -127,7 +159,13 @@ impl Controller {
         )?;
         self.send(Command::Replace(Box::new(engine)))
             .map_err(|_| RuntimeError::Busy)?;
+        self.replaces_sent += 1;
+        self.created_for.retain(|node, _| nodes.contains(node));
+        for node in made {
+            self.created_for.insert(node, self.replaces_sent);
+        }
         self.running = nodes;
+        self.failed.clear();
         self.replaces_in_flight += 1;
         Ok(())
     }
@@ -139,6 +177,9 @@ impl Controller {
         }
         self.send(Command::Clear).map_err(|_| RuntimeError::Busy)?;
         self.running.clear();
+        self.failed.clear();
+        self.created_for.clear();
+        self.replaces_sent += 1;
         self.replaces_in_flight += 1;
         Ok(())
     }
@@ -162,16 +203,36 @@ impl Controller {
     }
 
     /// Handles what came back from the real-time thread and returns the failure, if
-    /// any: replaced engines are dropped here. Call it regularly.
+    /// any: replaced engines are dropped here, and the node that failed gets a new
+    /// processor with the next plan. A failure of a processor already replaced (an
+    /// older engine's, reported after a newer engine created the node a new one) is
+    /// still returned, but marks nothing. Call it regularly.
     pub fn poll(&mut self) -> Option<RuntimeError> {
         let mut failure = None;
         while let Ok(event) = self.events.pop() {
             match event {
                 Event::Replaced(_) => self.replaces_in_flight -= 1,
-                Event::Failed(error) => failure = Some(error),
+                Event::Failed { engine, error } => {
+                    if let Some(node) = error.node()
+                        && self
+                            .created_for
+                            .get(&node)
+                            .is_some_and(|&created| created <= engine)
+                        && !self.failed.contains(&node)
+                    {
+                        self.failed.push(node);
+                    }
+                    failure = Some(error);
+                }
             }
         }
         failure
+    }
+
+    /// Whether a node of the last engine sent failed, so a new plan (even of the same
+    /// graph) would bring it back with a new processor.
+    pub fn has_failed_nodes(&self) -> bool {
+        !self.failed.is_empty()
     }
 
     fn can_replace(&self) -> bool {
@@ -190,12 +251,21 @@ impl Controller {
 pub struct Renderer {
     commands: Consumer<Command>,
     events: Producer<Event>,
+    sample_rate: f32,
     engine: Option<Box<Engine>>,
+    /// `Replace`s and `Clear`s applied so far: the number of the running engine.
+    replaces_applied: u64,
     /// The engine failed: don't run it again until it's replaced.
     failed: bool,
 }
 
 impl Renderer {
+    /// Samples per second per channel of what it renders: the rate its engines are
+    /// prepared with. A device running at another rate has to resample.
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
     /// Fills `device`, interleaved with `channels` channels per frame: applies waiting
     /// messages, then processes as many blocks as it takes and mixes what the output
     /// nodes got. Silent when nothing runs or the engine failed.
@@ -214,7 +284,10 @@ impl Renderer {
                 let frames = block.len() / channels;
                 if let Err(error) = engine.process(frames) {
                     self.failed = true;
-                    self.send(Event::Failed(error));
+                    self.send(Event::Failed {
+                        engine: self.replaces_applied,
+                        error,
+                    });
                     block.fill(0.0);
                     break;
                 }
@@ -254,11 +327,13 @@ impl Renderer {
                         new.adopt(old);
                     }
                     self.failed = false;
+                    self.replaces_applied += 1;
                     let old = self.engine.replace(new);
                     self.send(Event::Replaced(old));
                 }
                 Command::Clear => {
                     self.failed = false;
+                    self.replaces_applied += 1;
                     let old = self.engine.take();
                     self.send(Event::Replaced(old));
                 }
@@ -545,6 +620,106 @@ mod tests {
         ));
         assert_eq!(run.render(8), [0.0; 16]);
         assert!(run.controller.poll().is_none(), "not reported again");
+    }
+
+    #[test]
+    fn a_failed_processor_is_replaced_by_the_next_plan() {
+        use v_signal_nodes_plugin_api::{PluginError, ProcessIo};
+
+        /// Fails if it's the first one made, else outputs a constant.
+        struct FirstFails(bool);
+
+        impl NodeProcessor for FirstFails {
+            fn process(&mut self, io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
+                if self.0 {
+                    return Err(PluginError::new("test failure"));
+                }
+                io.output(0).fill(0.5);
+                Ok(())
+            }
+        }
+
+        let mut run = Run::new();
+        let source = run.add(GENERATOR);
+        let sink = run.add(DEVICE_OUTPUT);
+        run.connect(source, sink);
+        let mut made = 0;
+        let mut send = |run: &mut Run| {
+            let plan = compile(&run.graph).unwrap();
+            let host = &run.host;
+            run.controller.run_plan(plan, |step| {
+                if step.node != source {
+                    return host.create_processor(&step.spec.type_id);
+                }
+                made += 1;
+                Ok(Box::new(FirstFails(made == 1)) as Box<dyn NodeProcessor>)
+            })
+        };
+        send(&mut run).unwrap();
+        assert_eq!(run.render(8), [0.0; 16]);
+        assert!(matches!(
+            run.controller.poll(),
+            Some(RuntimeError::Plugin { node, .. }) if node == source
+        ));
+
+        send(&mut run).unwrap();
+
+        assert_eq!(run.render(8), [0.5; 16], "a new processor runs");
+        send(&mut run).unwrap();
+        assert_eq!(made, 2, "the working one is kept");
+    }
+
+    #[test]
+    fn a_failure_of_a_replaced_processor_marks_nothing() {
+        use v_signal_nodes_plugin_api::{PluginError, ProcessIo};
+
+        /// Fails if it's the first one made, else outputs a constant.
+        struct FirstFails(bool);
+
+        impl NodeProcessor for FirstFails {
+            fn process(&mut self, io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
+                if self.0 {
+                    return Err(PluginError::new("test failure"));
+                }
+                io.output(0).fill(0.5);
+                Ok(())
+            }
+        }
+
+        let mut run = Run::new();
+        let source = run.add(GENERATOR);
+        let sink = run.add(DEVICE_OUTPUT);
+        run.connect(source, sink);
+        let mut made = 0;
+        let mut send = |run: &mut Run| {
+            let plan = compile(&run.graph).unwrap();
+            let host = &run.host;
+            run.controller.run_plan(plan, |step| {
+                if step.node != source {
+                    return host.create_processor(&step.spec.type_id);
+                }
+                made += 1;
+                Ok(Box::new(FirstFails(made == 1)) as Box<dyn NodeProcessor>)
+            })
+        };
+        send(&mut run).unwrap();
+        run.render(8);
+
+        // Before the failure is polled, the source leaves the plan and comes back:
+        // it gets a new processor, which works.
+        run.graph.disconnect(InputRef::new(sink, 0));
+        send(&mut run).unwrap();
+        run.connect(source, sink);
+        send(&mut run).unwrap();
+        assert!(matches!(
+            run.controller.poll(),
+            Some(RuntimeError::Plugin { node, .. }) if node == source
+        ));
+        assert!(!run.controller.has_failed_nodes(), "that processor is gone");
+
+        send(&mut run).unwrap();
+        assert_eq!(made, 2, "the new one is kept");
+        assert_eq!(run.render(8), [0.5; 16]);
     }
 
     #[test]

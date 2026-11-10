@@ -7,7 +7,13 @@ license.workspace = true
 
 [dependencies]
 cpal.workspace = true
+rubato.workspace = true
 v-signal-nodes-runtime.workspace = true
+
+[dev-dependencies]
+v-signal-nodes-core.workspace = true
+v-signal-nodes-plugin-host.workspace = true
+v-signal-nodes-plugin-std.workspace = true
 
 [lints]
 workspace = true

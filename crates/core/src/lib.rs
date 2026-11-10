@@ -7,8 +7,8 @@
 //! sampled signal, not the target. For now samples are real-valued (`f32`);
 //! complex (IQ) and bit formats are planned.
 //!
-//! - [`model`]: node types ([`NodeSpec`]: sockets, parameters, translations),
-//!   the [`NodeFactory`] registry and [`Node`] instances.
+//! - [`model`]: node types ([`NodeSpec`]: sockets, parameters, translations) and
+//!   [`Node`] instances.
 //! - [`graph`]: the editing model, a [`Graph`] of nodes under generational
 //!   [`NodeId`]s and the connection rules (sockets fit, one source per input,
 //!   no cycles).
@@ -23,9 +23,9 @@ pub mod plan;
 pub use crate::error::{Error, ParamProblem, SpecProblem};
 pub use graph::{Graph, GraphError, InputRef, NodeId, OutputRef};
 pub use model::{
-    AxisUnit, ChoiceParam, MAX_CHANNELS, MAX_PLOT_POINTS, Node, NodeFactory, NodeKind, NodeSocket,
+    ChoiceParam, MAX_CHANNELS, MAX_PLOT_BEAMS, MAX_PLOT_POINTS, Node, NodeKind, NodeSocket,
     NodeSpec, NumberParam, ParamKey, ParamKind, ParamSpec, ParamValue, PlotWindow, Rgb, SignalRate,
-    SocketDirection, TextKey, ToggleParam, Translation, WindowContent, WindowSpec,
+    SocketDirection, TextKey, ToggleParam, Translation, Unit, WindowContent, WindowSpec,
 };
 pub use plan::{
     BufferId, BufferShape, CompileError, Conversion, Input, Plan, PlanOutput, Step, compile,

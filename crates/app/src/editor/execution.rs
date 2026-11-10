@@ -19,6 +19,17 @@
 //!   and the plot windows are what comes of it.
 //!
 //! Both are polled once per frame by [`update`](VSignalNodesApp::update_execution).
+//! A node that fails on the device leaves it silent; after [`RETRY_DELAY`] the plan
+//! goes again, with a new processor for that node.
+//!
+//! Opening another graph ([`replace_graph`](VSignalNodesApp::replace_graph)) starts a
+//! real-time run over: node ids of different graphs may coincide, so processors and
+//! plots kept by node id can't carry over.
+//!
+//! Both run at the project's sample rate (`VSignalNodesApp::sample_rate`), whatever
+//! the device's: the device driver resamples. Processors are prepared for one rate, so
+//! a new rate starts a real-time run over with new ones
+//! ([`set_sample_rate`](VSignalNodesApp::set_sample_rate)).
 //!
 //! Nodes with plot windows get their processor wrapped when it's created
 //! ([`make_processor`]). It publishes from whichever thread runs it, and a window
@@ -32,7 +43,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use v_signal_nodes_core::{CompileError, Error, NodeId, ParamValue, Plan, Step, compile};
+use v_signal_nodes_core::{
+    CompileError, Error, Graph, NodeId, ParamValue, Plan, Step, Unit, compile,
+};
 use v_signal_nodes_device::{DeviceError, Output, OutputStream};
 use v_signal_nodes_plugin_host::PluginHost;
 #[cfg(test)]
@@ -42,15 +55,23 @@ use v_signal_nodes_runtime::realtime::{self, Controller};
 use v_signal_nodes_runtime::{Engine, NodeProcessor, RuntimeError, processors_for};
 
 use super::VSignalNodesApp;
+use crate::document::SAMPLE_RATE_RANGE;
 
 /// Longest block of real-time processing, in frames: device blocks are cut to this.
 const REALTIME_MAX_FRAMES: usize = 512;
 /// Block size of one-pass processing: memory is this × the number of live buffers.
 const ONE_PASS_MAX_FRAMES: usize = 1 << 16;
-/// Length of a one-pass run. There is no way to choose it in the UI yet.
+/// Length of a one-pass run, in frames at the project's rate. There is no way to
+/// choose it in the UI yet.
 const ONE_PASS_FRAMES: usize = 1 << 20;
-/// Sample rate of a one-pass run: no device sets it, and the UI can't yet.
-const ONE_PASS_SAMPLE_RATE: f32 = 48_000.0;
+/// Fewest samples per period a frequency may have before the editor warns about it:
+/// with fewer, a sine looks like a triangle on screen and the harmonics of other
+/// waveforms fold back below half the sample rate.
+pub(super) const MIN_SAMPLES_PER_PERIOD: f32 = 4.0;
+/// How long after a node failed on the device it gets a new processor: soon enough to
+/// come back by itself, seldom enough that a node failing every time doesn't rebuild
+/// every frame.
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// How often the UI wakes up to poll what's running.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -91,6 +112,8 @@ struct RealtimeRun {
     _stream: OutputStream,
     controller: Controller,
     device_errors: Receiver<DeviceError>,
+    /// When to send the plan again because a node failed, if one did.
+    retry_at: Option<Instant>,
 }
 
 /// What came of a one-pass run.
@@ -190,22 +213,41 @@ impl VSignalNodesApp {
     /// Brings the compile status up to date if the graph changed since.
     pub(super) fn refresh_compile_status(&mut self) {
         if self.execution.compiled_revision != self.graph.revision() {
-            self.mark_graph_replaced();
+            self.recompile_status();
         }
     }
 
-    /// Recompiles for the status, whatever the revision says: for after `graph` was
-    /// replaced by another one, whose revision numbers mean nothing here.
-    pub(super) fn mark_graph_replaced(&mut self) {
+    /// Recompiles for the status, whatever the revision says, and marks the running
+    /// plan outdated.
+    fn recompile_status(&mut self) {
         self.execution.compiled_revision = self.graph.revision();
         self.execution.compile_error = self.compile_graph().err();
         self.execution.plan_outdated = true;
+    }
+
+    /// Puts `graph`, to run at `sample_rate` (within [`SAMPLE_RATE_RANGE`]), in place
+    /// of the edited one. Another graph numbers its nodes anew, so its ids may be the
+    /// old nodes' ids, and nothing keyed by node id may carry over: the plots go, and a
+    /// real-time run starts over with new processors for every node, instead of
+    /// handing the old nodes' processors to new nodes of the same id. Its revisions
+    /// mean nothing here either, so the status is recompiled.
+    pub(super) fn replace_graph(&mut self, graph: Graph, sample_rate: u32) {
+        debug_assert!(SAMPLE_RATE_RANGE.contains(&sample_rate));
+        self.graph = graph;
+        self.sample_rate = sample_rate;
+        self.execution.plots.clear();
+        self.recompile_status();
+        if self.execution.is_running_realtime() {
+            self.stop_realtime();
+            self.toggle_realtime();
+        }
     }
 
     /// Per-frame work: the compile status, a new plan for a running device, and what
     /// the running threads sent back. Keeps the UI waking up while anything runs.
     pub(super) fn update_execution(&mut self, ctx: &egui::Context) {
         self.refresh_compile_status();
+        self.retry_failed_nodes();
         self.send_outdated_plan();
         self.poll_realtime();
         self.poll_one_pass();
@@ -245,13 +287,55 @@ impl VSignalNodesApp {
         self.execution.failure = None;
     }
 
+    /// The samples per second the graph runs at.
+    pub(super) fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// Frequencies set too high for the sample rate: every parameter in
+    /// [`Unit::Hertz`] above `sample_rate / MIN_SAMPLES_PER_PERIOD`, as
+    /// `(node, parameter index, frequency)`, by node id. Checked on every node, also
+    /// one that doesn't run yet, so the warning comes before the run.
+    pub(super) fn few_samples_per_period(&self) -> impl Iterator<Item = (NodeId, usize, f32)> {
+        let limit = self.sample_rate as f32 / MIN_SAMPLES_PER_PERIOD;
+        self.graph.nodes().flat_map(move |(id, node)| {
+            node.spec()
+                .params
+                .iter()
+                .zip(node.params())
+                .enumerate()
+                .filter_map(move |(index, (spec, value))| {
+                    let frequency = value.as_number()?;
+                    (spec.unit == Some(Unit::Hertz) && frequency > limit)
+                        .then_some((id, index, frequency))
+                })
+        })
+    }
+
+    /// Runs the graph at `rate` from now on: a real-time run starts over with new
+    /// processors, prepared for it; a one-pass run keeps its rate until it ends.
+    /// Refuses (returns `false`) a rate outside [`SAMPLE_RATE_RANGE`].
+    pub(super) fn set_sample_rate(&mut self, rate: u32) -> bool {
+        if !SAMPLE_RATE_RANGE.contains(&rate) {
+            return false;
+        }
+        if rate != self.sample_rate {
+            self.sample_rate = rate;
+            if self.execution.is_running_realtime() {
+                self.stop_realtime();
+                self.toggle_realtime();
+            }
+        }
+        true
+    }
+
     /// Opens the device and runs the graph on it. The device starts silent and gets
     /// the plan through the same path later changes take.
     fn start_realtime(&mut self) -> Result<RealtimeRun, String> {
         let plan = self.compile_graph().map_err(|err| err.to_string())?;
         let output = Output::default_device().map_err(|err| err.to_string())?;
         let (mut controller, renderer) =
-            realtime::channel(output.sample_rate(), REALTIME_MAX_FRAMES);
+            realtime::channel(self.sample_rate as f32, REALTIME_MAX_FRAMES);
         let plugins = &self.plugins;
         let plots = &mut self.execution.plots;
         controller
@@ -266,7 +350,20 @@ impl VSignalNodesApp {
             _stream: stream,
             controller,
             device_errors,
+            retry_at: None,
         })
+    }
+
+    /// Once [`RETRY_DELAY`] has passed since a node failed on the device, sends the
+    /// plan again, even of an unchanged graph: the failed nodes get new processors in
+    /// it. Without this, the output would stay silent until the next edit.
+    fn retry_failed_nodes(&mut self) {
+        if let Some(run) = &mut self.execution.realtime
+            && run.retry_at.is_some_and(|at| at <= Instant::now())
+        {
+            run.retry_at = None;
+            self.execution.plan_outdated = true;
+        }
     }
 
     /// Sends the graph's plan to the running device if it's newer than what runs
@@ -313,6 +410,9 @@ impl VSignalNodesApp {
         };
         if let Some(error) = run.controller.poll() {
             self.execution.failure = Some(error.to_string());
+            if run.controller.has_failed_nodes() && run.retry_at.is_none() {
+                run.retry_at = Some(Instant::now() + RETRY_DELAY);
+            }
         }
         if let Ok(error) = run.device_errors.try_recv() {
             self.execution.failure = Some(error.to_string());
@@ -344,8 +444,13 @@ impl VSignalNodesApp {
         let plots = &mut self.execution.plots;
         let processors = processors_for(&plan, &[], |step| make_processor(plugins, plots, step))
             .map_err(|err| err.to_string())?;
-        Engine::new(plan, processors, ONE_PASS_SAMPLE_RATE, ONE_PASS_MAX_FRAMES)
-            .map_err(|err| err.to_string())
+        Engine::new(
+            plan,
+            processors,
+            self.sample_rate as f32,
+            ONE_PASS_MAX_FRAMES,
+        )
+        .map_err(|err| err.to_string())
     }
 
     fn poll_one_pass(&mut self) {
@@ -394,7 +499,9 @@ mod tests {
     use super::*;
     use crate::editor::commands::Command;
     use v_signal_nodes_core::{InputRef, OutputRef};
-    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOGRAPH};
+    use v_signal_nodes_plugin_std::{
+        AMPLIFIER, DEVICE_OUTPUT, DUAL_BEAM_OSCILLOSCOPE, GENERATOR, OSCILLOSCOPE,
+    };
 
     /// An app with source → gain → sink.
     fn runnable() -> VSignalNodesApp {
@@ -495,7 +602,7 @@ mod tests {
         assert!(!app.execution.is_running_realtime());
     }
 
-    /// Generator → oscillograph on the real device: sweeps reach the window from the
+    /// Generator → oscilloscope on the real device: sweeps reach the window from the
     /// real-time thread, and without an output node nothing is heard. Ignored like the
     /// test above.
     #[test]
@@ -507,7 +614,7 @@ mod tests {
             .add_node_at(app.kind_of(GENERATOR).unwrap(), egui::Pos2::ZERO)
             .unwrap();
         let scope = app
-            .add_node_at(app.kind_of(OSCILLOGRAPH).unwrap(), egui::pos2(300.0, 0.0))
+            .add_node_at(app.kind_of(OSCILLOSCOPE).unwrap(), egui::pos2(300.0, 0.0))
             .unwrap();
         assert!(app.connect(OutputRef::new(source, 0), InputRef::new(scope, 0)));
         app.refresh_compile_status();
@@ -528,6 +635,30 @@ mod tests {
             .iter()
             .fold(0.0_f32, |peak, s| peak.max(s.abs()));
         assert!((peak - 1.0).abs() < 0.05, "{peak}");
+    }
+
+    /// A new sample rate while running: the device starts over, resampling whatever
+    /// the project's rate is. Only an unconnected output node, so it's silent. Ignored
+    /// like the test above.
+    #[test]
+    #[ignore = "needs an output device"]
+    fn a_new_sample_rate_restarts_the_device() {
+        let mut app = VSignalNodesApp::default();
+        let ctx = egui::Context::default();
+        app.add_node_at(app.kind_of(DEVICE_OUTPUT).unwrap(), egui::Pos2::ZERO)
+            .unwrap();
+        app.refresh_compile_status();
+        app.execute(Command::RunRealtime);
+
+        for rate in [96_000, 44_100, 192_000] {
+            assert!(app.set_sample_rate(rate));
+            for _ in 0..5 {
+                app.update_execution(&ctx);
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(app.execution.failure(), None, "{rate}");
+            assert!(app.execution.is_running_realtime(), "{rate}");
+        }
     }
 
     /// A changed parameter goes straight to the running device: no recompiling, no new
@@ -573,8 +704,8 @@ mod tests {
         assert_eq!(step.params[0], ParamValue::Number(0.5));
     }
 
-    /// A voltage on the screen of an oscillograph, without any device: a one-pass run
-    /// of generator → oscillograph, with no output node.
+    /// A voltage on the screen of an oscilloscope, without any device: a one-pass run
+    /// of generator → oscilloscope, with no output node.
     #[test]
     fn a_run_reaches_the_plot_window() {
         let mut app = VSignalNodesApp::default();
@@ -583,7 +714,7 @@ mod tests {
             .add_node_at(app.kind_of(GENERATOR).unwrap(), egui::Pos2::ZERO)
             .unwrap();
         let scope = app
-            .add_node_at(app.kind_of(OSCILLOGRAPH).unwrap(), egui::pos2(300.0, 0.0))
+            .add_node_at(app.kind_of(OSCILLOSCOPE).unwrap(), egui::pos2(300.0, 0.0))
             .unwrap();
         assert!(app.connect(OutputRef::new(source, 0), InputRef::new(scope, 0)));
         app.refresh_compile_status();
@@ -613,6 +744,103 @@ mod tests {
         assert_eq!(app.execution.plot_frame(scope, 0), None);
     }
 
+    /// Two generators into the dual-beam oscilloscope, once: both beams reach its
+    /// window in one frame, the second with its own amplitude.
+    #[test]
+    fn both_beams_of_a_dual_beam_oscilloscope_reach_the_window() {
+        let mut app = VSignalNodesApp::default();
+        let first = app
+            .add_node_at(app.kind_of(GENERATOR).unwrap(), egui::Pos2::ZERO)
+            .unwrap();
+        let second = app
+            .add_node_at(app.kind_of(GENERATOR).unwrap(), egui::pos2(0.0, 300.0))
+            .unwrap();
+        let scope = app
+            .add_node_at(
+                app.kind_of(DUAL_BEAM_OSCILLOSCOPE).unwrap(),
+                egui::pos2(300.0, 0.0),
+            )
+            .unwrap();
+        let amplitude = app
+            .graph
+            .node(second)
+            .unwrap()
+            .spec()
+            .param_index("amplitude")
+            .unwrap();
+        assert!(app.set_param(second, amplitude, ParamValue::Number(3.0)));
+        assert!(app.connect(OutputRef::new(first, 0), InputRef::new(scope, 0)));
+        assert!(app.connect(OutputRef::new(second, 0), InputRef::new(scope, 1)));
+
+        run_once(&mut app);
+
+        let frame = app.execution.plot_frame(scope, 0).unwrap();
+        assert_eq!(frame.beams, 2);
+        let peaks: Vec<f32> = frame
+            .beams()
+            .map(|beam| beam.iter().fold(0.0_f32, |peak, s| peak.max(s.abs())))
+            .collect();
+        assert!((peaks[0] - 1.0).abs() < 0.05, "{peaks:?}");
+        assert!((peaks[1] - 3.0).abs() < 0.15, "{peaks:?}");
+    }
+
+    /// Another graph's nodes may have the ids of the old ones: the old nodes' plots
+    /// must not show up in their windows.
+    #[test]
+    fn opening_a_document_forgets_the_plots() {
+        let mut app = VSignalNodesApp::default();
+        let source = app
+            .add_node_at(app.kind_of(GENERATOR).unwrap(), egui::Pos2::ZERO)
+            .unwrap();
+        let scope = app
+            .add_node_at(app.kind_of(OSCILLOSCOPE).unwrap(), egui::pos2(300.0, 0.0))
+            .unwrap();
+        assert!(app.connect(OutputRef::new(source, 0), InputRef::new(scope, 0)));
+        let document = app.to_document();
+        run_once(&mut app);
+        assert!(app.execution.plot_frame(scope, 0).is_some());
+
+        app.open_document(&document).unwrap();
+
+        let reopened = app
+            .nodes()
+            .find(|node| node.node.type_id() == OSCILLOSCOPE)
+            .unwrap()
+            .id;
+        assert_eq!(reopened, scope, "the same id in the new graph");
+        assert_eq!(app.execution.plot_frame(scope, 0), None);
+    }
+
+    /// Opening a document while running at the same sample rate: the device starts
+    /// over with the new graph instead of handing it the old nodes' processors.
+    /// Silent: the old graph has only an unconnected output node, the new one too.
+    /// Ignored because CI machines have no device.
+    #[test]
+    #[ignore = "needs an output device"]
+    fn opening_a_document_while_running_starts_over() {
+        let mut app = VSignalNodesApp::default();
+        let ctx = egui::Context::default();
+        app.add_node_at(app.kind_of(DEVICE_OUTPUT).unwrap(), egui::Pos2::ZERO)
+            .unwrap();
+        let document = app.to_document();
+        app.refresh_compile_status();
+        app.execute(Command::RunRealtime);
+        assert!(app.execution.is_running_realtime());
+
+        app.open_document(&document).unwrap();
+
+        assert!(app.execution.is_running_realtime());
+        assert!(
+            !app.execution.plan_outdated,
+            "started over with the new graph"
+        );
+        for _ in 0..5 {
+            app.update_execution(&ctx);
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(app.execution.failure(), None);
+    }
+
     #[test]
     fn one_pass_runs_on_a_thread_and_reports() {
         let mut app = runnable();
@@ -633,5 +861,99 @@ mod tests {
         let summary = app.execution.one_pass_result().unwrap();
         assert_eq!(summary.frames, ONE_PASS_FRAMES);
         assert!(summary.peak > 0.9, "a full-scale source at gain 1");
+    }
+
+    /// Runs `app` once to the end and returns what came of it.
+    fn run_once(app: &mut VSignalNodesApp) -> OnePassSummary {
+        let ctx = egui::Context::default();
+        app.execute(Command::RunAsync);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while app.execution.is_running_one_pass() {
+            assert!(Instant::now() < deadline, "the run doesn't finish");
+            app.update_execution(&ctx);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.execution.failure(), None);
+        app.execution.one_pass_result().unwrap()
+    }
+
+    #[test]
+    fn a_run_goes_at_the_projects_sample_rate() {
+        let mut app = runnable();
+        let source = app
+            .nodes()
+            .find(|node| node.node.type_id() == GENERATOR)
+            .unwrap()
+            .id;
+        let frequency = app
+            .graph
+            .node(source)
+            .unwrap()
+            .spec()
+            .param_index("frequency")
+            .unwrap();
+        assert!(app.set_param(source, frequency, ParamValue::Number(30_000.0)));
+        assert_eq!(app.sample_rate(), 48_000);
+
+        let peak = run_once(&mut app).peak;
+        assert!(
+            peak < 1e-3,
+            "above half of 48 kHz the generator stops: {peak}"
+        );
+
+        assert!(app.set_sample_rate(96_000));
+        let peak = run_once(&mut app).peak;
+        assert!(peak > 0.9, "below half of 96 kHz: {peak}");
+    }
+
+    #[test]
+    fn frequencies_too_high_for_the_sample_rate_are_found() {
+        let mut app = runnable();
+        let source = app
+            .nodes()
+            .find(|node| node.node.type_id() == GENERATOR)
+            .unwrap()
+            .id;
+        let frequency = app
+            .graph
+            .node(source)
+            .unwrap()
+            .spec()
+            .param_index("frequency")
+            .unwrap();
+        assert_eq!(app.few_samples_per_period().count(), 0, "1 kHz at 48 kHz");
+
+        // A quarter of 48 kHz is still enough; above it isn't.
+        assert!(app.set_param(source, frequency, ParamValue::Number(12_000.0)));
+        assert_eq!(app.few_samples_per_period().count(), 0);
+        assert!(app.set_param(source, frequency, ParamValue::Number(12_001.0)));
+        assert_eq!(
+            app.few_samples_per_period().collect::<Vec<_>>(),
+            [(source, frequency, 12_001.0)]
+        );
+
+        // Only parameters in hertz count: a large amplitude doesn't.
+        assert!(app.set_param(source, frequency, ParamValue::Number(10_000.0)));
+        let amplitude = app
+            .graph
+            .node(source)
+            .unwrap()
+            .spec()
+            .param_index("amplitude")
+            .unwrap();
+        assert!(app.set_param(source, amplitude, ParamValue::Number(1000.0)));
+        assert_eq!(app.few_samples_per_period().count(), 0);
+
+        assert!(app.set_sample_rate(32_000));
+        assert_eq!(app.few_samples_per_period().count(), 1, "a lower rate");
+    }
+
+    #[test]
+    fn sample_rates_out_of_range_are_refused() {
+        let mut app = VSignalNodesApp::default();
+        for rate in [0, 999, 10_000_001] {
+            assert!(!app.set_sample_rate(rate), "{rate}");
+        }
+        assert_eq!(app.sample_rate(), 48_000);
     }
 }

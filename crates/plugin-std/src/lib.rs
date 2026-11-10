@@ -10,10 +10,11 @@
 //! | `std.amplifier`         | [`amplifier`]         | Processor  | In         | Out     | Gain, *Clipping, Supply*                   |
 //! | `std.summing_amplifier` | [`summing_amplifier`] | Processor  | In 1, 2, 3 | Out     | Gain, *Weight 1, 2, 3*, *Clipping, Supply* |
 //! | `std.device_output`     | [`device_output`]     | Output     | In         | —       | —                                          |
-//! | `std.oscillograph`      | [`oscillograph`]      | Instrument | In         | —       | Sweep, *Trigger*, *Level*                  |
+//! | `std.oscilloscope`      | [`oscilloscope`]      | Instrument | In         | —       | Sweep, *Trigger*, *Level*, *Interpolation* |
+//! | `std.dual_beam_oscilloscope` | [`dual_beam_oscilloscope`] | Instrument | In 1, 2 | — | Sweep, *Trigger*, *Trigger source*, *Level*, *Interpolation* |
 //!
-//! Parameters in italics are advanced (`ParamSpec::advanced`). The oscillograph also
-//! has a window with its screen. Every label is English in the spec, with Russian
+//! Parameters in italics are advanced (`ParamSpec::advanced`). The oscilloscopes also
+//! have a window with their screen. Every label is English in the spec, with Russian
 //! translations next to it (`NodeSpec::translate`), so the editor needs no strings of
 //! its own for these nodes. Parameters are declared once as key constants, used both
 //! for the spec and for reading the values in `process`.
@@ -24,13 +25,14 @@
 
 pub mod amplifier;
 pub mod device_output;
+pub mod dual_beam_oscilloscope;
 pub mod generator;
-pub mod oscillograph;
+pub mod oscilloscope;
 pub mod summing_amplifier;
 
 use v_signal_nodes_plugin_api::{
     NumberParam, ParamKey, ParamSpec, Plugin, PluginError, ProcessIo, Registrar, TextKey,
-    ToggleParam,
+    ToggleParam, Unit,
 };
 
 /// Type id of the voltage generator.
@@ -39,8 +41,10 @@ pub const GENERATOR: &str = "std.generator";
 pub const AMPLIFIER: &str = "std.amplifier";
 /// Type id of the summing amplifier.
 pub const SUMMING_AMPLIFIER: &str = "std.summing_amplifier";
-/// Type id of the oscillograph.
-pub const OSCILLOGRAPH: &str = "std.oscillograph";
+/// Type id of the oscilloscope.
+pub const OSCILLOSCOPE: &str = "std.oscilloscope";
+/// Type id of the dual-beam oscilloscope.
+pub const DUAL_BEAM_OSCILLOSCOPE: &str = "std.dual_beam_oscilloscope";
 /// Type id of the output to the device.
 pub const DEVICE_OUTPUT: &str = "std.device_output";
 
@@ -55,7 +59,10 @@ const SUPPLY: NumberParam = NumberParam("supply");
 fn clipping_specs() -> [ParamSpec; 2] {
     [
         CLIPPING.spec("Clipping", false).advanced(),
-        SUPPLY.spec("Supply, V", 0.1, 1000.0, 15.0).advanced(),
+        SUPPLY
+            .spec("Supply, V", 0.1, 1000.0, 15.0)
+            .unit(Unit::Volts)
+            .advanced(),
     ]
 }
 
@@ -93,7 +100,8 @@ impl Plugin for StdPlugin {
         registrar.register_node(Box::new(amplifier::Amplifier));
         registrar.register_node(Box::new(summing_amplifier::SummingAmplifier));
         registrar.register_node(Box::new(device_output::DeviceOutput));
-        registrar.register_node(Box::new(oscillograph::Oscillograph));
+        registrar.register_node(Box::new(oscilloscope::Oscilloscope));
+        registrar.register_node(Box::new(dual_beam_oscilloscope::DualBeamOscilloscope));
     }
 }
 
@@ -186,7 +194,7 @@ mod tests {
             AMPLIFIER,
             SUMMING_AMPLIFIER,
             DEVICE_OUTPUT,
-            OSCILLOGRAPH,
+            OSCILLOSCOPE,
         ] {
             assert!(
                 specs.iter().any(|spec| spec.type_id == type_id),

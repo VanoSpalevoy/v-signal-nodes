@@ -97,6 +97,8 @@ pub enum ParamProblem {
     /// A choice needs options.
     NoOptions,
     DefaultOutOfRange,
+    /// Only a number has a unit.
+    UnitOfNonNumber,
 }
 
 impl fmt::Display for Error {
@@ -176,6 +178,7 @@ impl fmt::Display for ParamProblem {
             Self::BadRange => "range must be finite with min <= max",
             Self::NoOptions => "no options",
             Self::DefaultOutOfRange => "default out of range",
+            Self::UnitOfNonNumber => "only a number has a unit",
         })
     }
 }

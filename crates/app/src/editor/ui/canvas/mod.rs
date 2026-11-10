@@ -330,7 +330,7 @@ mod tests {
     use v_signal_nodes_core::{
         Node, NodeKind as Role, NodeSocket, NodeSpec, ParamSpec, ParamValue,
     };
-    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOGRAPH};
+    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOSCOPE};
 
     /// A headless canvas: node interaction and controls, in the order of a real frame,
     /// without the panels and the scroll area, so screen = canvas × `scale`.
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn each_button_opens_and_closes_its_window_of_nodes_that_have_one() {
         let mut canvas = Canvas::new(1.0);
-        let scope = canvas.add(OSCILLOGRAPH);
+        let scope = canvas.add(OSCILLOSCOPE);
         let advanced = canvas.window_button(scope, 0);
         let preview = canvas.window_button(scope, 1);
         let separate = canvas.window_button(scope, 2);

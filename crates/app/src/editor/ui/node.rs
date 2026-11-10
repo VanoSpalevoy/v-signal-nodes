@@ -342,7 +342,7 @@ pub(in crate::editor) fn std_kind(type_id: &str) -> NodeKind {
 mod tests {
     use super::*;
     use v_signal_nodes_core::{Graph, NodeSocket, ParamSpec};
-    use v_signal_nodes_plugin_std::{AMPLIFIER, GENERATOR, OSCILLOGRAPH, SUMMING_AMPLIFIER};
+    use v_signal_nodes_plugin_std::{AMPLIFIER, GENERATOR, OSCILLOSCOPE, SUMMING_AMPLIFIER};
 
     /// A graph holding one node of `spec`, and its id.
     fn one_node(spec: Arc<NodeSpec>) -> (Graph, NodeId) {
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn a_node_has_a_window_for_advanced_params_and_two_for_each_declared_one() {
-        let (graph, id) = one_node(std_spec(OSCILLOGRAPH));
+        let (graph, id) = one_node(std_spec(OSCILLOSCOPE));
         let node = NodeWidget::new(id, graph.node(id).unwrap(), egui::Pos2::ZERO);
 
         assert_eq!(
@@ -448,7 +448,7 @@ mod tests {
     fn a_node_widens_only_for_buttons_that_do_not_fit() {
         assert_eq!(node_size(&std_spec(AMPLIFIER)).x, NODE_WIDTH);
         assert_eq!(
-            node_size(&std_spec(OSCILLOGRAPH)).x,
+            node_size(&std_spec(OSCILLOSCOPE)).x,
             NODE_WIDTH + HEADER_BUTTON_SIZE
         );
     }

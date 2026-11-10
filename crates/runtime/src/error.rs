@@ -26,6 +26,19 @@ pub enum RuntimeError {
     Busy,
 }
 
+impl RuntimeError {
+    /// The node the error is about, if it's about one.
+    pub fn node(&self) -> Option<NodeId> {
+        match *self {
+            Self::MissingProcessor(node)
+            | Self::CreateProcessor { node, .. }
+            | Self::Plugin { node, .. }
+            | Self::Panicked(node) => Some(node),
+            Self::TooManyFrames { .. } | Self::Busy => None,
+        }
+    }
+}
+
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

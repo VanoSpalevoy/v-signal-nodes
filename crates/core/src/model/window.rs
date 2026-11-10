@@ -7,32 +7,26 @@
 //! parameters:
 //!
 //! ```
-//! use v_signal_nodes_core::{AxisUnit, PlotWindow};
+//! use v_signal_nodes_core::{Unit, PlotWindow};
 //!
 //! const SCREEN: PlotWindow = PlotWindow("screen");
 //!
-//! let spec = SCREEN.spec("Screen", AxisUnit::Seconds, AxisUnit::Volts);
+//! let spec = SCREEN.spec("Screen", Unit::Seconds, Unit::Volts);
 //! assert_eq!(spec.id, "screen");
 //! ```
 
-use crate::model::TextKey;
+use crate::model::{TextKey, Unit};
 
-/// Most points a plot window takes per frame; longer frames are cut to this.
+/// Most points a plot window takes per beam of a frame; longer beams are cut to this.
 pub const MAX_PLOT_POINTS: usize = 4096;
-
-/// What the numbers on a plot's axis are. An enum, not text, so the editor can
-/// translate the unit and pick its prefix (ms, µV).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum AxisUnit {
-    Seconds,
-    Volts,
-}
+/// Most beams of one plot frame: signals drawn over each other on the same axes.
+pub const MAX_PLOT_BEAMS: usize = 4;
 
 /// What a window of a node shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowContent {
     /// A graph of the frames the node's processor publishes.
-    Plot { x: AxisUnit, y: AxisUnit },
+    Plot { x: Unit, y: Unit },
 }
 
 /// One window of a node type.
@@ -51,7 +45,7 @@ pub struct PlotWindow(pub &'static str);
 
 impl PlotWindow {
     /// The spec of this window: a plot with these axes.
-    pub fn spec(self, name: impl Into<String>, x: AxisUnit, y: AxisUnit) -> WindowSpec {
+    pub fn spec(self, name: impl Into<String>, x: Unit, y: Unit) -> WindowSpec {
         WindowSpec {
             id: self.0.to_owned(),
             name: name.into(),

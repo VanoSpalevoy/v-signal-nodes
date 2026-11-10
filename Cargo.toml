@@ -23,6 +23,8 @@ eframe = "0.37.0"
 # (LGPL-2.1) dynamically, through `alsa-sys`; no JACK (off by default).
 cpal = "0.18.2"
 libloading = "0.9.0"
+# Resampling from the project's sample rate to the device's (`crates/device`).
+rubato = { version = "5.0.1", default-features = false }
 # Lock-free queues to and from the real-time thread (`runtime::realtime`,
 # `runtime::plots`).
 rtrb = "0.4.1"

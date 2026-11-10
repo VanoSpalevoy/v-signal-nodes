@@ -9,7 +9,7 @@ use eframe::egui;
 use v_signal_nodes_core::{Error, Graph, InputRef, OutputRef};
 
 use super::{MAX_NODE_COUNT, RouteCache, VSignalNodesApp, ui};
-use crate::document::{DocConnection, DocNode, Document, DocumentError};
+use crate::document::{DocConnection, DocNode, Document, DocumentError, SAMPLE_RATE_RANGE};
 
 impl VSignalNodesApp {
     /// The graph as a [`Document`] for saving: nodes in paint order with their
@@ -44,13 +44,18 @@ impl VSignalNodesApp {
                 to_input: to.index,
             })
             .collect();
-        Document::new(used_plugins, nodes, connections)
+        Document::new(self.sample_rate, used_plugins, nodes, connections)
     }
 
     /// Replaces the graph with `document`'s, all or nothing: on error the editor
     /// is left unchanged.
     ///
-    /// Fails if a used plugin isn't loaded, there are more than
+    /// Takes the document's sample rate too. A running device starts over with new
+    /// processors for every node (`replace_graph`): the new nodes' ids may be the
+    /// old nodes' ones.
+    ///
+    /// Fails if the sample rate is outside [`SAMPLE_RATE_RANGE`], a used plugin
+    /// isn't loaded, there are more than
     /// [`MAX_NODE_COUNT`] nodes, a node has an unknown type, a repeated ID, an
     /// unknown parameter or a value its spec doesn't accept, or a connection
     /// refers to a missing node or socket, feeds an input twice or closes a cycle
@@ -64,6 +69,9 @@ impl VSignalNodesApp {
     /// Clears the transient state: selection, drag, warnings and routes.
     #[allow(dead_code, reason = "no Open command in the UI yet")]
     pub(crate) fn open_document(&mut self, document: &Document) -> Result<(), DocumentError> {
+        if !SAMPLE_RATE_RANGE.contains(&document.sample_rate) {
+            return Err(DocumentError::UnsupportedSampleRate(document.sample_rate));
+        }
         let missing: Vec<_> = document
             .used_plugins
             .iter()
@@ -137,8 +145,7 @@ impl VSignalNodesApp {
                 })?;
         }
 
-        self.graph = graph;
-        self.mark_graph_replaced();
+        self.replace_graph(graph, document.sample_rate);
         self.positions = positions;
         self.z_order = z_order;
         self.node_limit_reached = false;
@@ -198,8 +205,10 @@ mod tests {
     fn document_round_trip() {
         let (mut app, ids) = sample_graph();
         app.raise_node(ids[0]);
+        assert!(app.set_sample_rate(192_000));
         let document = app.to_document();
 
+        assert_eq!(document.sample_rate, 192_000);
         assert_eq!(document.used_plugins, ["std"]);
         assert_eq!(document.nodes.len(), 4);
         assert_eq!(document.nodes[3].id, 0, "paint order is kept");
@@ -281,6 +290,10 @@ mod tests {
         };
         type Breakage<'a> = Box<dyn Fn(&mut Document) + 'a>;
         let broken: Vec<(&str, Breakage<'_>)> = vec![
+            (
+                "sample rate out of range",
+                Box::new(|doc| doc.sample_rate = 0),
+            ),
             (
                 "missing plugin",
                 Box::new(|doc| doc.used_plugins.push("fx".into())),

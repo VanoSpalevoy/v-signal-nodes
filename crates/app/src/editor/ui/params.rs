@@ -79,7 +79,7 @@ pub(super) fn param_control(
 /// How much one point of dragging changes a number at `value` in `min..=max`:
 /// relative to the value, so a range as wide as 20 Hz to 20 kHz stays usable at both
 /// ends.
-fn drag_speed(value: f32, min: f32, max: f32) -> f64 {
+pub(super) fn drag_speed(value: f32, min: f32, max: f32) -> f64 {
     let relative = f64::from(value.abs()) * DRAG_RELATIVE_SPEED;
     if min > 0.0 {
         relative

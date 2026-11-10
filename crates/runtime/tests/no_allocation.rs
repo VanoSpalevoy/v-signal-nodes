@@ -14,7 +14,7 @@ use v_signal_nodes_plugin_api::{
 };
 use v_signal_nodes_plugin_host::PluginHost;
 use v_signal_nodes_plugin_std::{
-    AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOGRAPH, SUMMING_AMPLIFIER, StdPlugin,
+    AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOSCOPE, SUMMING_AMPLIFIER, StdPlugin,
 };
 use v_signal_nodes_runtime::{plots, realtime};
 
@@ -136,7 +136,7 @@ fn the_real_time_thread_doesnt_allocate() {
     let mixer = add(&mut graph, &host, SUMMING_AMPLIFIER);
     let sink = add(&mut graph, &host, DEVICE_OUTPUT);
     let direct = add(&mut graph, &host, STEREO_SINK);
-    let scope = add(&mut graph, &host, OSCILLOGRAPH);
+    let scope = add(&mut graph, &host, OSCILLOSCOPE);
     connect(&mut graph, source, gain, 0);
     connect(&mut graph, gain, mixer, 0);
     connect(&mut graph, source, mixer, 1);

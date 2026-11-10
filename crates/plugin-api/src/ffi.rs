@@ -34,9 +34,9 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::{
-    AxisUnit, NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, ParamKind, ParamSpec,
-    ParamValue, Plugin, PluginError, ProcessIo, RawBuffer, RawPlotSink, Registrar, Rgb, SignalRate,
-    SocketDirection, TextKey, Translation, WindowContent, WindowSpec, slice_from_raw,
+    NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, ParamKind, ParamSpec, ParamValue,
+    Plugin, PluginError, ProcessIo, RawBuffer, RawPlotSink, Registrar, Rgb, SignalRate,
+    SocketDirection, TextKey, Translation, Unit, WindowContent, WindowSpec, slice_from_raw,
 };
 
 /// Name of the exported [`VersionFn`].
@@ -137,6 +137,8 @@ pub struct FfiParam {
     pub options: FfiSlice<FfiStr>,
     /// Non-zero if the parameter is [`ParamSpec::advanced`].
     pub advanced: u8,
+    /// [`Unit`] code of [`ParamSpec::unit`], or `u8::MAX` for none.
+    pub unit: u8,
 }
 
 /// A window of a [`FfiNodeSpec`]. Which fields matter depends on `kind`: plot —
@@ -149,9 +151,9 @@ pub struct FfiWindow {
     pub name: FfiStr,
     /// [`WindowContent`] code.
     pub kind: u8,
-    /// [`AxisUnit`] code of the horizontal axis.
+    /// [`Unit`] code of the horizontal axis.
     pub x_unit: u8,
-    /// [`AxisUnit`] code of the vertical axis.
+    /// [`Unit`] code of the vertical axis.
     pub y_unit: u8,
 }
 
@@ -362,20 +364,27 @@ fn node_kind_from(code: u8) -> Result<NodeKind, PluginError> {
     })
 }
 
-fn axis_unit_code(unit: AxisUnit) -> u8 {
+fn unit_code(unit: Unit) -> u8 {
     match unit {
-        AxisUnit::Seconds => 0,
-        AxisUnit::Volts => 1,
+        Unit::Seconds => 0,
+        Unit::Volts => 1,
+        Unit::Hertz => 2,
+        Unit::Degrees => 3,
     }
 }
 
-fn axis_unit_from(code: u8) -> Result<AxisUnit, PluginError> {
+fn unit_from(code: u8) -> Result<Unit, PluginError> {
     Ok(match code {
-        0 => AxisUnit::Seconds,
-        1 => AxisUnit::Volts,
-        _ => return Err(bad_code("axis unit", code)),
+        0 => Unit::Seconds,
+        1 => Unit::Volts,
+        2 => Unit::Hertz,
+        3 => Unit::Degrees,
+        _ => return Err(bad_code("unit", code)),
     })
 }
+
+/// [`FfiParam::unit`] of a parameter without a unit.
+const NO_UNIT: u8 = u8::MAX;
 
 const WINDOW_PLOT: u8 = 0;
 
@@ -510,6 +519,10 @@ pub unsafe fn read_spec(spec: &FfiNodeSpec) -> Result<NodeSpec, PluginError> {
                     name: param.name.read()?,
                     kind,
                     advanced: param.advanced != 0,
+                    unit: match param.unit {
+                        NO_UNIT => None,
+                        code => Some(unit_from(code)?),
+                    },
                 })
             })
             .collect::<Result<_, PluginError>>()?;
@@ -520,8 +533,8 @@ pub unsafe fn read_spec(spec: &FfiNodeSpec) -> Result<NodeSpec, PluginError> {
             .map(|window| {
                 let content = match window.kind {
                     WINDOW_PLOT => WindowContent::Plot {
-                        x: axis_unit_from(window.x_unit)?,
-                        y: axis_unit_from(window.y_unit)?,
+                        x: unit_from(window.x_unit)?,
+                        y: unit_from(window.y_unit)?,
                     },
                     code => return Err(bad_code("window kind", code)),
                 };
@@ -666,6 +679,7 @@ impl ExportedNode {
                     default,
                     options: FfiSlice::new(options),
                     advanced: u8::from(param.advanced),
+                    unit: param.unit.map_or(NO_UNIT, unit_code),
                 }
             })
             .collect();
@@ -674,9 +688,7 @@ impl ExportedNode {
             .iter()
             .map(|window| {
                 let (kind, x_unit, y_unit) = match window.content {
-                    WindowContent::Plot { x, y } => {
-                        (WINDOW_PLOT, axis_unit_code(x), axis_unit_code(y))
-                    }
+                    WindowContent::Plot { x, y } => (WINDOW_PLOT, unit_code(x), unit_code(y)),
                 };
                 FfiWindow {
                     id: FfiStr::of(&window.id),

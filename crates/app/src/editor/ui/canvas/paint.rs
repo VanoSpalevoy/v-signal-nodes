@@ -441,18 +441,39 @@ fn paint_header(painter: &egui::Painter, view: View, node: &NodeWidget, language
         egui::Stroke::new(view.len(1.0), color.gamma_multiply(0.3)),
     );
 
-    let title_rect = painter.text(
-        egui::pos2(rect.left() + view.len(TITLE_PADDING), header.center().y),
-        egui::Align2::LEFT_CENTER,
-        node.title(language),
+    // The title and its number end before the header's buttons: a title too long for
+    // that is cut short with an ellipsis, the number always shows.
+    let id = painter.layout_no_wrap(format!("#{}", node.id), view.font(11.0), TEXT_DIM);
+    let buttons_left = view
+        .rect(window_button_rect(
+            node,
+            node.windows().count().saturating_sub(1),
+        ))
+        .left()
+        .min(view.rect(delete_button_rect(node)).left());
+    let title_left = rect.left() + view.len(TITLE_PADDING);
+    let gap = view.len(5.0);
+    let mut title = egui::text::LayoutJob::simple_singleline(
+        node.title(language).to_owned(),
         view.font(13.0),
         TEXT,
     );
-    painter.text(
-        egui::pos2(title_rect.right() + view.len(5.0), header.center().y),
-        egui::Align2::LEFT_CENTER,
-        format!("#{}", node.id),
-        view.font(11.0),
+    title.wrap = egui::text::TextWrapping::truncate_at_width(
+        (buttons_left - gap - id.size().x - gap - title_left).max(0.0),
+    );
+    let title = painter.layout_job(title);
+    let title_width = title.size().x;
+    painter.galley(
+        egui::pos2(title_left, header.center().y - title.size().y * 0.5),
+        title,
+        TEXT,
+    );
+    painter.galley(
+        egui::pos2(
+            title_left + title_width + gap,
+            header.center().y - id.size().y * 0.5,
+        ),
+        id,
         TEXT_DIM,
     );
 }
@@ -595,6 +616,44 @@ mod tests {
 
     const RED: Color32 = Color32::from_rgb(255, 0, 0);
     const BLUE: Color32 = Color32::from_rgb(0, 0, 255);
+
+    #[test]
+    fn a_long_title_ends_before_the_header_buttons() {
+        use crate::editor::VSignalNodesApp;
+        use crate::editor::tests::add;
+        use v_signal_nodes_plugin_std::DUAL_BEAM_OSCILLOSCOPE;
+
+        let mut app = VSignalNodesApp::default();
+        let id = add(&mut app, DUAL_BEAM_OSCILLOSCOPE, pos2(50.0, 50.0));
+        let node = app.node(id).unwrap();
+        let view = View {
+            origin: egui::Vec2::ZERO,
+            scale: 1.0,
+        };
+        let buttons_left = window_button_rect(&node, node.windows().count() - 1).left();
+        for language in [Language::English, Language::Russian] {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                paint_header(ui.painter(), view, &node, language);
+            });
+            output.textures_delta.clear();
+            let texts: Vec<egui::Rect> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.visual_bounding_rect()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts.len(), 2, "the title and the number");
+            for text in texts {
+                assert!(
+                    text.right() < buttons_left,
+                    "{language:?}: {text:?} reaches the buttons at {buttons_left}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn curves_between_vertically_aligned_sockets_flatten() {

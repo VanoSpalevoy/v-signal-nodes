@@ -107,7 +107,9 @@ impl Engine {
     /// Like [`new`](Self::new), for an engine that will replace one running
     /// `previous` (its nodes, in step order), at the same `sample_rate` and
     /// `max_frames`: nodes also in `previous` need no processor here, they keep
-    /// theirs through [`adopt`](Self::adopt), and with it their signal history.
+    /// theirs through [`adopt`](Self::adopt), and with it their signal history. A
+    /// processor given for such a node replaces the old one instead (e.g. one that
+    /// failed), which then stays behind in `previous`.
     pub fn successor(
         plan: Plan,
         previous: &[NodeId],
@@ -123,14 +125,14 @@ impl Engine {
         let mut ordered: Vec<Box<dyn NodeProcessor>> = Vec::with_capacity(plan.steps().len());
         let mut carried = Vec::new();
         for (index, step) in plan.steps().iter().enumerate() {
-            if let Some(&old) = old_steps.get(&step.node) {
+            let Some(mut processor) = processors.remove(&step.node) else {
+                let &old = old_steps
+                    .get(&step.node)
+                    .ok_or(RuntimeError::MissingProcessor(step.node))?;
                 carried.push((old, index));
                 ordered.push(Box::new(Carried));
                 continue;
-            }
-            let mut processor = processors
-                .remove(&step.node)
-                .ok_or(RuntimeError::MissingProcessor(step.node))?;
+            };
             let prepared = catch_unwind(AssertUnwindSafe(|| {
                 processor.prepare(sample_rate, max_frames)
             }));

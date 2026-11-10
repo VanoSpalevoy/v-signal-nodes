@@ -6,11 +6,16 @@
 //! the device takes, allocating nothing. Everything about graphs and plans stays in
 //! `runtime`, testable without a device.
 //!
+//! The device runs at its own sample rate. A renderer at another one (the project's)
+//! goes through a [`Resampled`] on the way.
+//!
 //! A sound card is what `cpal` reaches, so this is one driver among those to come
 //! (ADC/DAC, files, displays), each doing the same with its own hardware.
 //!
 //! Licenses: on Linux `cpal` links ALSA's `libasound` (LGPL-2.1) dynamically; it
 //! isn't part of this program's code. CoreAudio and WASAPI are system APIs.
+
+mod resample;
 
 use std::fmt;
 use std::sync::mpsc::Sender;
@@ -18,6 +23,8 @@ use std::sync::mpsc::Sender;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{ErrorKind, FromSample, Sample, SampleFormat, SizedSample, StreamConfig};
 use v_signal_nodes_runtime::realtime::Renderer;
+
+pub use resample::{MAX_SINC_LEN, Resampled};
 
 /// Frames of the `f32` buffer between the renderer and the device's format; longer
 /// device blocks are rendered piece by piece.
@@ -32,6 +39,8 @@ pub enum DeviceError {
     UnsupportedFormat(String),
     /// The system's message about a failed call.
     Backend(String),
+    /// No resampler from the renderer's sample rate to the device's.
+    Resampling(String),
 }
 
 impl fmt::Display for DeviceError {
@@ -42,14 +51,15 @@ impl fmt::Display for DeviceError {
                 write!(f, "unsupported device sample format {format}")
             }
             Self::Backend(message) => f.write_str(message),
+            Self::Resampling(message) => write!(f, "can't resample for the device: {message}"),
         }
     }
 }
 
 impl std::error::Error for DeviceError {}
 
-/// The default output device with its configuration, not running yet. Its sample
-/// rate is what the engines for it have to be prepared with.
+/// The default output device with its configuration, not running yet. It runs at its
+/// own sample rate, whatever the renderer's.
 pub struct Output {
     device: cpal::Device,
     config: StreamConfig,
@@ -82,30 +92,40 @@ impl Output {
         usize::from(self.config.channels)
     }
 
-    /// Starts the device: from now on its thread calls `renderer` for every block.
-    /// Runs until the returned stream is dropped. What ends the stream later (a device
+    /// Starts the device: from now on its thread calls `renderer` for every block,
+    /// through a [`Resampled`] if the renderer's sample rate isn't the device's. Runs
+    /// until the returned stream is dropped. What ends the stream later (a device
     /// unplugged) arrives on `errors`; passing glitches don't.
     pub fn start(
         self,
         renderer: Renderer,
         errors: Sender<DeviceError>,
     ) -> Result<OutputStream, DeviceError> {
+        let feed = if renderer.sample_rate() == self.sample_rate() {
+            Feed::Direct(renderer)
+        } else {
+            Feed::Resampled(Box::new(Resampled::new(
+                renderer,
+                self.sample_rate(),
+                self.channels(),
+            )?))
+        };
         match self.format {
-            SampleFormat::F32 => self.start_as::<f32>(renderer, errors),
-            SampleFormat::F64 => self.start_as::<f64>(renderer, errors),
-            SampleFormat::I16 => self.start_as::<i16>(renderer, errors),
-            SampleFormat::U16 => self.start_as::<u16>(renderer, errors),
-            SampleFormat::I32 => self.start_as::<i32>(renderer, errors),
-            SampleFormat::U32 => self.start_as::<u32>(renderer, errors),
-            SampleFormat::I8 => self.start_as::<i8>(renderer, errors),
-            SampleFormat::U8 => self.start_as::<u8>(renderer, errors),
+            SampleFormat::F32 => self.start_as::<f32>(feed, errors),
+            SampleFormat::F64 => self.start_as::<f64>(feed, errors),
+            SampleFormat::I16 => self.start_as::<i16>(feed, errors),
+            SampleFormat::U16 => self.start_as::<u16>(feed, errors),
+            SampleFormat::I32 => self.start_as::<i32>(feed, errors),
+            SampleFormat::U32 => self.start_as::<u32>(feed, errors),
+            SampleFormat::I8 => self.start_as::<i8>(feed, errors),
+            SampleFormat::U8 => self.start_as::<u8>(feed, errors),
             format => Err(DeviceError::UnsupportedFormat(format.to_string())),
         }
     }
 
     fn start_as<T>(
         self,
-        mut renderer: Renderer,
+        mut feed: Feed,
         errors: Sender<DeviceError>,
     ) -> Result<OutputStream, DeviceError>
     where
@@ -120,7 +140,7 @@ impl Output {
                 move |device: &mut [T], _| {
                     for block in device.chunks_mut(scratch.len()) {
                         let samples = &mut scratch[..block.len()];
-                        renderer.render(samples, channels);
+                        feed.render(samples, channels);
                         for (out, &sample) in block.iter_mut().zip(samples.iter()) {
                             *out = sample.to_sample();
                         }
@@ -141,6 +161,22 @@ impl Output {
             .play()
             .map_err(|err| DeviceError::Backend(err.to_string()))?;
         Ok(OutputStream { _stream: stream })
+    }
+}
+
+/// Where the device's callback gets its samples.
+enum Feed {
+    /// The renderer runs at the device's rate.
+    Direct(Renderer),
+    Resampled(Box<Resampled>),
+}
+
+impl Feed {
+    fn render(&mut self, device: &mut [f32], channels: usize) {
+        match self {
+            Self::Direct(renderer) => renderer.render(device, channels),
+            Self::Resampled(resampled) => resampled.render(device),
+        }
     }
 }
 

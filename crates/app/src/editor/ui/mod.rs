@@ -94,6 +94,14 @@ const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(124, 130, 144);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(108, 168, 255);
 /// Errors and destructive actions.
 const DANGER: egui::Color32 = egui::Color32::from_rgb(235, 96, 96);
+/// Color of generators ([`node_color`]), also of the second beam of a plot.
+const GENERATOR_GREEN: egui::Color32 = egui::Color32::from_rgb(82, 196, 126);
+/// Color of processors ([`node_color`]).
+const PROCESSOR_VIOLET: egui::Color32 = egui::Color32::from_rgb(152, 124, 250);
+/// Color of outputs ([`node_color`]).
+const OUTPUT_ORANGE: egui::Color32 = egui::Color32::from_rgb(236, 128, 92);
+/// Color of instruments ([`node_color`]).
+const INSTRUMENT_CYAN: egui::Color32 = egui::Color32::from_rgb(84, 192, 214);
 /// Rounding of buttons and other controls.
 const CONTROL_RADIUS: u8 = 6;
 
@@ -199,10 +207,10 @@ fn node_color(spec: &NodeSpec) -> egui::Color32 {
         return egui::Color32::from_rgb(color.r, color.g, color.b);
     }
     match spec.kind {
-        Role::Generator => egui::Color32::from_rgb(82, 196, 126),
-        Role::Processor => egui::Color32::from_rgb(152, 124, 250),
-        Role::Output => egui::Color32::from_rgb(236, 128, 92),
-        Role::Instrument => egui::Color32::from_rgb(84, 192, 214),
+        Role::Generator => GENERATOR_GREEN,
+        Role::Processor => PROCESSOR_VIOLET,
+        Role::Output => OUTPUT_ORANGE,
+        Role::Instrument => INSTRUMENT_CYAN,
     }
 }
 

@@ -19,11 +19,11 @@
 //! re-exports from `v-signal-nodes-core`: [`NodeSpec`] and what it's made of
 //! ([`NodeKind`], [`Rgb`], [`NodeSocket`], [`SocketDirection`], [`SignalRate`],
 //! [`MAX_CHANNELS`], [`ParamSpec`], [`ParamKind`], [`WindowSpec`], [`WindowContent`],
-//! [`AxisUnit`], [`TextKey`], [`Translation`]), [`ParamValue`] and the typed keys
+//! [`MAX_PLOT_POINTS`], [`MAX_PLOT_BEAMS`],
+//! [`Unit`], [`TextKey`], [`Translation`]), [`ParamValue`] and the typed keys
 //! ([`ParamKey`], [`NumberParam`], [`ChoiceParam`], [`ToggleParam`], [`PlotWindow`]).
 //! A change to any of them is a change to the
-//! plugin API. The rest of `core` (the graph-side `Node`, `NodeFactory`,
-//! `Error`) is the host's business and isn't exposed; plugins report errors
+//! plugin API. The rest of `core` (the graph-side `Node`, `Error`) is the host's business and isn't exposed; plugins report errors
 //! with [`PluginError`]. Dynamic libraries don't see the Rust types at all, only
 //! their C layout in [`ffi`], so those types may change without breaking the ABI
 //! as long as [`ffi`] doesn't.
@@ -35,7 +35,10 @@
 //! ([`NodeSpec::window`]) and drawn by the host, which gives the node one button per
 //! window. A plot window ([`PlotWindow`]) shows the frames `process` publishes with
 //! [`ProcessIo::plot`], without allocating or waiting; publishing costs next to
-//! nothing while no window looks at it.
+//! nothing while no window looks at it. A frame may hold several beams, drawn over
+//! each other ([`ProcessIo::plot_beams`]). A frame says how to draw it ([`PlotTrace`]):
+//! straight lines between its points, or the band-limited signal its samples stand
+//! for, interpolated by sin(x)/x.
 //!
 //! ```ignore
 //! use v_signal_nodes_plugin_api::*;
@@ -89,9 +92,9 @@ use std::slice;
 pub mod ffi;
 
 pub use v_signal_nodes_core::{
-    AxisUnit, ChoiceParam, MAX_CHANNELS, MAX_PLOT_POINTS, NodeKind, NodeSocket, NodeSpec,
+    ChoiceParam, MAX_CHANNELS, MAX_PLOT_BEAMS, MAX_PLOT_POINTS, NodeKind, NodeSocket, NodeSpec,
     NumberParam, ParamKey, ParamKind, ParamSpec, ParamValue, PlotWindow, Rgb, SignalRate,
-    SocketDirection, TextKey, ToggleParam, Translation, WindowContent, WindowSpec,
+    SocketDirection, TextKey, ToggleParam, Translation, Unit, WindowContent, WindowSpec,
 };
 
 /// Version of this API. The host refuses dynamic libraries built against another
@@ -99,7 +102,7 @@ pub use v_signal_nodes_core::{
 /// so they always match).
 ///
 /// Bump it on any change to the traits or to the [`ffi`] types.
-pub const API_VERSION: u32 = 6;
+pub const API_VERSION: u32 = 7;
 
 /// An error reported by a plugin.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +217,40 @@ impl RawBuffer {
     }
 }
 
+/// How the host draws a plot frame between its points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PlotTrace {
+    /// Straight lines from point to point. Right for any frame, and the only right
+    /// way for points that aren't consecutive samples, such as the lowest and highest
+    /// value of each stretch of a long frame.
+    #[default]
+    Lines,
+    /// The points are consecutive samples of a band-limited signal: the host may draw
+    /// the signal they stand for, interpolated by sin(x)/x as digital oscilloscopes do,
+    /// so a sine of a few samples per period still looks like one. Edges like those of
+    /// a square wave then ring (the Gibbs phenomenon).
+    Interpolated,
+}
+
+impl PlotTrace {
+    /// The code of this trace in [`RawPlotSink::publish`].
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Lines => 0,
+            Self::Interpolated => 1,
+        }
+    }
+
+    /// The trace with `code`, `None` for an unknown one.
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Lines),
+            1 => Some(Self::Interpolated),
+            _ => None,
+        }
+    }
+}
+
 /// Where the frames of one plot window go: a function of the host and its state, so
 /// it can cross the C ABI unchanged. The host keeps `publish` from panicking, and
 /// from allocating or waiting, as it runs on the real-time thread.
@@ -222,9 +259,19 @@ impl RawBuffer {
 pub struct RawPlotSink {
     /// The host's state.
     pub ctx: *mut c_void,
-    /// Takes `len` samples at `samples`, `x_step` apart on the plot's horizontal axis.
-    pub publish:
-        unsafe extern "C" fn(ctx: *mut c_void, x_step: f32, samples: *const f32, len: usize),
+    /// Takes a frame of `beams` beams (1..=[`MAX_PLOT_BEAMS`]) of `len` samples each:
+    /// beam `b` starts at `samples + b * stride` (`stride >= len`). The samples are
+    /// `x_step` apart on the plot's horizontal axis, drawn as the [`PlotTrace`] with
+    /// code `trace`.
+    pub publish: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        x_step: f32,
+        samples: *const f32,
+        len: usize,
+        beams: usize,
+        stride: usize,
+        trace: u8,
+    ),
 }
 
 /// Everything a node gets for one [`process`](NodeProcessor::process) call:
@@ -383,17 +430,59 @@ impl<'a> ProcessIo<'a> {
 
     /// Publishes one frame to plot window `key`: `samples` (at most
     /// [`MAX_PLOT_POINTS`], the rest is cut off), `x_step` apart on the horizontal
-    /// axis. Allocates nothing and never waits: a frame nobody has room for is lost.
-    /// Fails if the spec has no such window: a plugin bug, like in [`get`](Self::get).
-    pub fn plot(&self, key: PlotWindow, x_step: f32, samples: &[f32]) -> Result<(), PluginError> {
+    /// axis, drawn as `trace`. Allocates nothing and never waits: a frame nobody has
+    /// room for is lost. Fails if the spec has no such window: a plugin bug, like in
+    /// [`get`](Self::get).
+    pub fn plot(
+        &self,
+        key: PlotWindow,
+        x_step: f32,
+        samples: &[f32],
+        trace: PlotTrace,
+    ) -> Result<(), PluginError> {
+        self.plot_beams(key, x_step, samples, 1, trace)
+    }
+
+    /// Publishes one frame of `beams` beams to plot window `key`: signals drawn over
+    /// each other on the same axes, like the beams of a multi-beam oscilloscope.
+    /// `samples` holds them one after another, all of one length (as the channels of
+    /// a buffer); each is cut to [`MAX_PLOT_POINTS`]. Otherwise as
+    /// [`plot`](Self::plot). Also fails if `beams` isn't in `1..=`[`MAX_PLOT_BEAMS`]
+    /// or doesn't divide `samples` evenly.
+    pub fn plot_beams(
+        &self,
+        key: PlotWindow,
+        x_step: f32,
+        samples: &[f32],
+        beams: usize,
+        trace: PlotTrace,
+    ) -> Result<(), PluginError> {
         let Some(index) = self.spec.window_index(key.0) else {
             return Err(PluginError::new(format!("no window '{}'", key.0)));
         };
+        if !(1..=MAX_PLOT_BEAMS).contains(&beams) || !samples.len().is_multiple_of(beams) {
+            return Err(PluginError::new(format!(
+                "{} samples don't make {beams} beams",
+                samples.len()
+            )));
+        }
         if let Some(sink) = self.plots.get(index) {
-            let len = samples.len().min(MAX_PLOT_POINTS);
-            // SAFETY: `with_plots` guarantees the sink can be called; the samples
-            // are valid for the call and the host only reads them.
-            unsafe { (sink.publish)(sink.ctx, x_step, samples.as_ptr(), len) };
+            let stride = samples.len() / beams;
+            let len = stride.min(MAX_PLOT_POINTS);
+            // SAFETY: `with_plots` guarantees the sink can be called; `beams` beams of
+            // `len <= stride` samples, `stride` apart, lie within `samples`, which are
+            // valid for the call, and the host only reads them.
+            unsafe {
+                (sink.publish)(
+                    sink.ctx,
+                    x_step,
+                    samples.as_ptr(),
+                    len,
+                    beams,
+                    stride,
+                    trace.code(),
+                );
+            };
         }
         Ok(())
     }
@@ -487,12 +576,29 @@ mod tests {
         assert_eq!(out, [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
     }
 
-    /// A frame as it reaches the sink in `plot_goes_to_the_sink_of_its_window`.
-    unsafe extern "C" fn record(ctx: *mut c_void, x_step: f32, samples: *const f32, len: usize) {
-        // SAFETY: the test passes a `Vec` as `ctx`, and `plot` a valid slice.
+    /// A frame as it reaches the sink: x step, its beams one after another, how many
+    /// there are, the trace code.
+    type Frame = (f32, Vec<f32>, usize, u8);
+
+    /// Records the frames of `plot_goes_to_the_sink_of_its_window` as [`Frame`]s.
+    unsafe extern "C" fn record(
+        ctx: *mut c_void,
+        x_step: f32,
+        samples: *const f32,
+        len: usize,
+        beams: usize,
+        stride: usize,
+        trace: u8,
+    ) {
+        // SAFETY: the test passes a `Vec` as `ctx`, and `plot_beams` `beams` slices
+        // of `len` samples, `stride` apart.
         unsafe {
-            let frames = &mut *ctx.cast::<Vec<(f32, Vec<f32>)>>();
-            frames.push((x_step, slice_from_raw(samples, len).to_vec()));
+            let frames = &mut *ctx.cast::<Vec<Frame>>();
+            let mut all = Vec::new();
+            for beam in 0..beams {
+                all.extend_from_slice(slice_from_raw(samples.add(beam * stride), len));
+            }
+            frames.push((x_step, all, beams, trace));
         }
     }
 
@@ -502,11 +608,11 @@ mod tests {
         const SECOND: PlotWindow = PlotWindow("second");
         let spec = NodeSpec::new("test.io", "IO", NodeKind::Instrument)
             .input(NodeSocket::signal_in("in"))
-            .window(FIRST.spec("First", AxisUnit::Seconds, AxisUnit::Volts))
-            .window(SECOND.spec("Second", AxisUnit::Seconds, AxisUnit::Volts));
-        let mut first = Vec::<(f32, Vec<f32>)>::new();
-        let mut second = Vec::<(f32, Vec<f32>)>::new();
-        let sink = |frames: &mut Vec<(f32, Vec<f32>)>| RawPlotSink {
+            .window(FIRST.spec("First", Unit::Seconds, Unit::Volts))
+            .window(SECOND.spec("Second", Unit::Seconds, Unit::Volts));
+        let mut first = Vec::<Frame>::new();
+        let mut second = Vec::<Frame>::new();
+        let sink = |frames: &mut Vec<Frame>| RawPlotSink {
             ctx: std::ptr::from_mut(frames).cast(),
             publish: record,
         };
@@ -516,13 +622,57 @@ mod tests {
         // for the call and nothing else touches them meanwhile.
         let io = unsafe { ProcessIo::from_raw(0, &spec, &[], &inputs, &[]).with_plots(&sinks) };
 
-        io.plot(SECOND, 0.5, &[1.0, 2.0]).unwrap();
-        assert!(io.plot(PlotWindow("missing"), 0.5, &[]).is_err());
+        io.plot(SECOND, 0.5, &[1.0, 2.0], PlotTrace::Interpolated)
+            .unwrap();
+        let missing = io.plot(PlotWindow("missing"), 0.5, &[], PlotTrace::Lines);
+        assert!(missing.is_err());
         let too_long = vec![0.0; MAX_PLOT_POINTS + 1];
-        io.plot(FIRST, 1.0, &too_long).unwrap();
+        io.plot(FIRST, 1.0, &too_long, PlotTrace::Lines).unwrap();
 
-        assert_eq!(second, [(0.5, vec![1.0, 2.0])]);
+        let interpolated = PlotTrace::Interpolated.code();
+        assert_eq!(second, [(0.5, vec![1.0, 2.0], 1, interpolated)]);
         assert_eq!(first[0].1.len(), MAX_PLOT_POINTS);
+        assert_eq!(PlotTrace::from_code(first[0].3), Some(PlotTrace::Lines));
+        assert_eq!(PlotTrace::from_code(2), None);
+    }
+
+    #[test]
+    fn beams_go_one_after_another_and_are_cut_one_by_one() {
+        const SCREEN: PlotWindow = PlotWindow("screen");
+        let spec = NodeSpec::new("test.io", "IO", NodeKind::Instrument)
+            .input(NodeSocket::signal_in("in"))
+            .window(SCREEN.spec("Screen", Unit::Seconds, Unit::Volts));
+        let mut frames = Vec::<Frame>::new();
+        let sinks = [RawPlotSink {
+            ctx: std::ptr::from_mut(&mut frames).cast(),
+            publish: record,
+        }];
+        let inputs = [RawBuffer::input(&[])];
+        // SAFETY: as in `plot_goes_to_the_sink_of_its_window`.
+        let io = unsafe { ProcessIo::from_raw(0, &spec, &[], &inputs, &[]).with_plots(&sinks) };
+
+        io.plot_beams(SCREEN, 1.0, &[1.0, 2.0, 3.0, 4.0], 2, PlotTrace::Lines)
+            .unwrap();
+        let mut long = vec![1.0; MAX_PLOT_POINTS + 1];
+        long.extend(vec![2.0; MAX_PLOT_POINTS + 1]);
+        io.plot_beams(SCREEN, 1.0, &long, 2, PlotTrace::Lines)
+            .unwrap();
+        for (samples, beams) in [(&[1.0, 2.0, 3.0][..], 2), (&[1.0][..], 0), (&[1.0; 5], 5)] {
+            assert!(
+                io.plot_beams(SCREEN, 1.0, samples, beams, PlotTrace::Lines)
+                    .is_err(),
+                "{beams} beams of {} samples",
+                samples.len()
+            );
+        }
+
+        assert_eq!(frames[0], (1.0, vec![1.0, 2.0, 3.0, 4.0], 2, 0));
+        let (_, cut, beams, _) = &frames[1];
+        assert_eq!(*beams, 2);
+        assert_eq!(cut.len(), 2 * MAX_PLOT_POINTS);
+        assert!(cut[..MAX_PLOT_POINTS].iter().all(|&s| s == 1.0));
+        assert!(cut[MAX_PLOT_POINTS..].iter().all(|&s| s == 2.0));
+        assert_eq!(frames.len(), 2);
     }
 
     #[test]
@@ -530,12 +680,12 @@ mod tests {
         const SCREEN: PlotWindow = PlotWindow("screen");
         let spec = NodeSpec::new("test.io", "IO", NodeKind::Instrument)
             .input(NodeSocket::signal_in("in"))
-            .window(SCREEN.spec("Screen", AxisUnit::Seconds, AxisUnit::Volts));
+            .window(SCREEN.spec("Screen", Unit::Seconds, Unit::Volts));
         let inputs = [RawBuffer::input(&[])];
         // SAFETY: zero frames, so an empty buffer per socket.
         let io = unsafe { ProcessIo::from_raw(0, &spec, &[], &inputs, &[]) };
 
-        assert!(io.plot(SCREEN, 1.0, &[1.0]).is_ok());
+        assert!(io.plot(SCREEN, 1.0, &[1.0], PlotTrace::Lines).is_ok());
     }
 
     #[test]

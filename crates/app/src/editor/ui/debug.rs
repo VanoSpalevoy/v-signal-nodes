@@ -6,6 +6,8 @@
 //!   sockets that don't fit, `connection_refused`);
 //! - why the graph can't run, before anyone tries (nothing for an empty canvas: there
 //!   is nothing to run yet), and what the last run came to (see `editor::execution`);
+//! - a warning per frequency parameter set too high for the sample rate
+//!   (`few_samples_per_period`), with the rate it would need;
 //! - the selected source socket, or "Ready" when nothing is selected and there
 //!   are no warnings;
 //! - every connection as `from_node Output n -> to_node Input m`, sorted by source
@@ -15,9 +17,11 @@
 //! numbers 1-based. Read-only: the panel never changes the app state.
 
 use eframe::egui;
-use v_signal_nodes_core::CompileError;
+use v_signal_nodes_core::{CompileError, Unit};
 
+use super::plot::quantity;
 use super::{TEXT_DIM, caption, panel_frame};
+use crate::editor::execution::MIN_SAMPLES_PER_PERIOD;
 use crate::editor::{Language, MAX_NODE_COUNT, SocketRef, Text, VSignalNodesApp};
 
 /// Height after which the connection list scrolls instead of growing the panel.
@@ -44,13 +48,14 @@ pub(super) fn show(app: &VSignalNodesApp, ui: &mut egui::Ui) {
                 ui.colored_label(ui.visuals().error_fg_color, app.language.text(reason));
             }
             show_execution(app, ui);
+            let warned = show_few_samples(app, ui);
             if let Some(source) = app.pending_source {
                 ui.label(format!(
                     "{} {}",
                     app.language.text(Text::SelectedSourceSocket),
                     socket_text(SocketRef::Output(source), app.language),
                 ));
-            } else if !app.node_limit_reached && app.connection_refused.is_none() {
+            } else if !app.node_limit_reached && app.connection_refused.is_none() && !warned {
                 ui.label(app.language.text(Text::Ready));
             }
             egui::ScrollArea::vertical()
@@ -111,6 +116,33 @@ fn show_execution(app: &VSignalNodesApp, ui: &mut egui::Ui) {
             format!("{}: {failure}", language.text(Text::RunFailed)),
         );
     }
+}
+
+/// One warning per frequency too high for the sample rate: "#0 Generator: Frequency,
+/// Hz 30 kHz — few samples per period, raise the sample rate to at least 120 kHz".
+/// Returns whether there was any.
+fn show_few_samples(app: &VSignalNodesApp, ui: &mut egui::Ui) -> bool {
+    let language = app.language;
+    let mut any = false;
+    for (id, index, frequency) in app.few_samples_per_period() {
+        let Some(node) = app.node(id) else {
+            continue;
+        };
+        any = true;
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "#{} {}: {} {} — {} {}",
+                id.index(),
+                node.title(language),
+                node.param_name(index, language),
+                quantity(frequency, Unit::Hertz, language),
+                language.text(Text::FewSamplesPerPeriod),
+                quantity(frequency * MIN_SAMPLES_PER_PERIOD, Unit::Hertz, language),
+            ),
+        );
+    }
+    any
 }
 
 /// `socket` as `node Side n`, e.g. `3 Output 1` (node number as in the node

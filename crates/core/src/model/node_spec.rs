@@ -1,17 +1,15 @@
-//! Building nodes from plugin-provided specs.
+//! Node types as plugins describe them.
 //!
-//! A plugin describes each node type it offers with a [`NodeSpec`]. Specs are
-//! registered in a [`NodeFactory`], validated once, and then used to stamp out
-//! [`Node`] instances, which share the spec instead of copying it. The spec lives
+//! A plugin describes each node type it offers with a [`NodeSpec`]. The host
+//! validates it once ([`NodeSpec::validate`]) and keeps it behind an `Arc`, shared
+//! with every [`Node`](crate::Node) built from it instead of copied. The spec lives
 //! in `core` (not in `plugin-api`) so both the plugin API and the host can use it
 //! without a dependency cycle.
 
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashSet;
 
 use crate::model::{
-    MAX_CHANNELS, Node, NodeKind, NodeSocket, ParamKind, ParamSpec, ParamValue, SocketDirection,
+    MAX_CHANNELS, NodeKind, NodeSocket, ParamKind, ParamSpec, ParamValue, SocketDirection,
     WindowSpec,
 };
 use crate::{Error, SpecProblem};
@@ -387,65 +385,6 @@ impl NodeSpec {
     }
 }
 
-/// Registry of node specs that builds [`Node`] instances.
-///
-/// Node ids are chosen by the caller (the graph owns id allocation), the factory
-/// only attaches the spec. Specs are kept behind an [`Arc`], shared with every
-/// node built from them and with whoever lists them.
-#[derive(Debug, Default)]
-pub struct NodeFactory {
-    /// Registered specs by type id (sorted, so listings are stable).
-    specs: BTreeMap<String, Arc<NodeSpec>>,
-}
-
-impl NodeFactory {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Validates and registers `spec`. Fails if the spec is invalid or its type id
-    /// is already taken.
-    pub fn register(&mut self, spec: NodeSpec) -> Result<(), Error> {
-        spec.validate()?;
-        match self.specs.entry(spec.type_id.clone()) {
-            Entry::Occupied(_) => Err(Error::DuplicateNodeType(spec.type_id)),
-            Entry::Vacant(entry) => {
-                entry.insert(Arc::new(spec));
-                Ok(())
-            }
-        }
-    }
-
-    /// Moves every spec of `other` into this factory, all or nothing: fails
-    /// without changing anything if one of its type ids is already taken. The
-    /// specs were validated when `other` registered them.
-    pub fn append(&mut self, other: NodeFactory) -> Result<(), Error> {
-        if let Some(type_id) = other.specs.keys().find(|id| self.specs.contains_key(*id)) {
-            return Err(Error::DuplicateNodeType(type_id.clone()));
-        }
-        self.specs.extend(other.specs);
-        Ok(())
-    }
-
-    /// The spec registered under `type_id`.
-    pub fn spec(&self, type_id: &str) -> Option<&Arc<NodeSpec>> {
-        self.specs.get(type_id)
-    }
-
-    /// All registered specs, sorted by type id.
-    pub fn specs(&self) -> impl Iterator<Item = &Arc<NodeSpec>> {
-        self.specs.values()
-    }
-
-    /// Builds a node of type `type_id`, with every parameter at its default.
-    pub fn build_node(&self, type_id: &str) -> Result<Node, Error> {
-        let spec = self
-            .spec(type_id)
-            .ok_or_else(|| Error::UnknownNodeType(type_id.to_owned()))?;
-        Ok(Node::new(Arc::clone(spec)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,17 +406,9 @@ mod tests {
     }
 
     #[test]
-    fn builds_nodes_from_specs() {
-        let mut factory = NodeFactory::new();
-        factory.register(gain()).unwrap();
-
-        let node = factory.build_node("test.gain").unwrap();
-
-        assert_eq!(node.type_id(), "test.gain");
-        assert_eq!(**node.spec(), gain());
-        assert!(Arc::ptr_eq(node.spec(), factory.spec("test.gain").unwrap()));
+    fn a_spec_gives_the_defaults_of_its_params() {
         assert_eq!(
-            node.params(),
+            gain().default_params(),
             [ParamValue::Number(1.0), ParamValue::Choice(0)]
         );
     }
@@ -532,42 +463,6 @@ mod tests {
             TextKey::<&str>::socket(SocketDirection::Output, 2),
             TextKey::Output(2)
         );
-    }
-
-    #[test]
-    fn rejects_duplicate_and_unknown_types() {
-        let mut factory = NodeFactory::new();
-        factory.register(gain()).unwrap();
-
-        assert!(factory.register(gain()).is_err());
-        assert!(factory.build_node("test.missing").is_err());
-    }
-
-    #[test]
-    fn appends_all_or_nothing() {
-        let mut factory = NodeFactory::new();
-        factory.register(gain()).unwrap();
-
-        let mut clashing = NodeFactory::new();
-        clashing
-            .register(NodeSpec {
-                type_id: "test.amp".into(),
-                ..gain()
-            })
-            .unwrap();
-        clashing.register(gain()).unwrap();
-        assert!(factory.append(clashing).is_err());
-        assert!(factory.spec("test.amp").is_none());
-
-        let mut other = NodeFactory::new();
-        other
-            .register(NodeSpec {
-                type_id: "test.amp".into(),
-                ..gain()
-            })
-            .unwrap();
-        factory.append(other).unwrap();
-        assert_eq!(factory.specs().count(), 2);
     }
 
     #[test]

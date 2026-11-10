@@ -13,26 +13,53 @@ use std::ffi::c_void;
 use std::slice;
 
 use rtrb::{Consumer, Producer, RingBuffer};
+pub use v_signal_nodes_plugin_api::PlotTrace;
 use v_signal_nodes_plugin_api::{
-    MAX_PLOT_POINTS, NodeProcessor, PluginError, ProcessIo, RawPlotSink,
+    MAX_PLOT_BEAMS, MAX_PLOT_POINTS, NodeProcessor, PluginError, ProcessIo, RawPlotSink,
 };
 
 /// Frames that can wait in a window's queues.
 const QUEUED_FRAMES: usize = 4;
 
 /// One frame of a plot.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlotFrame {
     /// Distance between two samples on the horizontal axis.
     pub x_step: f32,
+    /// The beams one after another, all of one length.
     pub samples: Vec<f32>,
+    /// How many beams `samples` holds, at least 1: signals drawn over each other.
+    pub beams: usize,
+    /// How to draw it between the samples.
+    pub trace: PlotTrace,
 }
 
-/// The size of a frame in the samples queue.
+impl Default for PlotFrame {
+    fn default() -> Self {
+        Self {
+            x_step: 0.0,
+            samples: Vec::new(),
+            beams: 1,
+            trace: PlotTrace::default(),
+        }
+    }
+}
+
+impl PlotFrame {
+    /// The samples of each beam, in order.
+    pub fn beams(&self) -> slice::ChunksExact<'_, f32> {
+        let len = self.samples.len() / self.beams.max(1);
+        self.samples.chunks_exact(len.max(1))
+    }
+}
+
+/// The size of a frame in the samples queue, and the rest of what it says.
 #[derive(Clone, Copy)]
 struct Header {
     x_step: f32,
     len: usize,
+    beams: usize,
+    trace: PlotTrace,
 }
 
 /// The publishing end for one window. A [`RawPlotSink`] points to it.
@@ -42,32 +69,52 @@ struct PlotWriter {
 }
 
 impl PlotWriter {
-    fn publish(&mut self, x_step: f32, frame: &[f32]) {
+    /// Queues a frame of `beams`, one after another.
+    fn publish(&mut self, x_step: f32, beams: &[&[f32]], trace: PlotTrace) {
         if self.headers.is_full() {
             return;
         }
-        let Ok(chunk) = self.samples.write_chunk_uninit(frame.len()) else {
+        let len: usize = beams.iter().map(|beam| beam.len()).sum();
+        let Ok(chunk) = self.samples.write_chunk_uninit(len) else {
             return;
         };
-        chunk.fill_from_iter(frame.iter().copied());
+        chunk.fill_from_iter(beams.iter().flat_map(|beam| beam.iter().copied()));
         // There's room: the only producer checked above.
         let _ = self.headers.push(Header {
             x_step,
-            len: frame.len(),
+            len,
+            beams: beams.len(),
+            trace,
         });
     }
 }
 
-/// [`RawPlotSink::publish`] of a [`PlotWriter`].
-unsafe extern "C" fn publish(ctx: *mut c_void, x_step: f32, samples: *const f32, len: usize) {
-    if len == 0 {
+/// [`RawPlotSink::publish`] of a [`PlotWriter`]. An unknown trace code, from a plugin
+/// of another API version, draws lines, which suit any frame; a frame of no beams or
+/// more than [`MAX_PLOT_BEAMS`] is dropped.
+unsafe extern "C" fn publish(
+    ctx: *mut c_void,
+    x_step: f32,
+    samples: *const f32,
+    len: usize,
+    beams: usize,
+    stride: usize,
+    trace: u8,
+) {
+    if len == 0 || !(1..=MAX_PLOT_BEAMS).contains(&beams) || stride < len {
         return;
     }
+    let trace = PlotTrace::from_code(trace).unwrap_or_default();
     // SAFETY: `ctx` is a writer of the `Observed` that made the sink, which is the one
-    // running now, and `ProcessIo::plot` passes a valid slice.
+    // running now, and `ProcessIo::plot_beams` passes `beams` valid slices of `len`
+    // samples, `stride` apart.
     unsafe {
         let writer = &mut *ctx.cast::<PlotWriter>();
-        writer.publish(x_step, slice::from_raw_parts(samples, len));
+        let mut slices: [&[f32]; MAX_PLOT_BEAMS] = [&[]; MAX_PLOT_BEAMS];
+        for (beam, slot) in slices.iter_mut().take(beams).enumerate() {
+            *slot = slice::from_raw_parts(samples.add(beam * stride), len);
+        }
+        writer.publish(x_step, &slices[..beams], trace);
     }
 }
 
@@ -88,6 +135,8 @@ impl PlotReader {
             };
             let frame = self.latest.get_or_insert_default();
             frame.x_step = header.x_step;
+            frame.trace = header.trace;
+            frame.beams = header.beams;
             frame.samples.clear();
             let (first, second) = chunk.as_slices();
             frame.samples.extend_from_slice(first);
@@ -156,7 +205,8 @@ pub fn with_plots(
     let mut readers = Vec::with_capacity(windows);
     for _ in 0..windows {
         let (header_writer, header_reader) = RingBuffer::new(QUEUED_FRAMES);
-        let (sample_writer, sample_reader) = RingBuffer::new(QUEUED_FRAMES * MAX_PLOT_POINTS);
+        let (sample_writer, sample_reader) =
+            RingBuffer::new(QUEUED_FRAMES * MAX_PLOT_POINTS * MAX_PLOT_BEAMS);
         writers.push(PlotWriter {
             headers: header_writer,
             samples: sample_writer,
@@ -185,24 +235,30 @@ pub fn with_plots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use v_signal_nodes_plugin_api::{AxisUnit, NodeKind, NodeSocket, NodeSpec, PlotWindow};
+    use v_signal_nodes_plugin_api::{NodeKind, NodeSocket, NodeSpec, PlotWindow, Unit};
 
     const SCREEN: PlotWindow = PlotWindow("screen");
 
-    /// Publishes its input as a frame, doubling `x_step` with every call.
+    /// Publishes its input as a frame, doubling `x_step` with every call; interpolated
+    /// if it has a single sample, so the tests see the trace come through.
     struct Publisher(f32);
 
     impl NodeProcessor for Publisher {
         fn process(&mut self, io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
             self.0 *= 2.0;
-            io.plot(SCREEN, self.0, io.input(0))
+            let trace = if io.input(0).len() == 1 {
+                PlotTrace::Interpolated
+            } else {
+                PlotTrace::Lines
+            };
+            io.plot(SCREEN, self.0, io.input(0), trace)
         }
     }
 
     fn spec() -> NodeSpec {
         NodeSpec::new("test.scope", "Scope", NodeKind::Instrument)
             .input(NodeSocket::signal_in("in"))
-            .window(SCREEN.spec("Screen", AxisUnit::Seconds, AxisUnit::Volts))
+            .window(SCREEN.spec("Screen", Unit::Seconds, Unit::Volts))
     }
 
     fn process(processor: &mut dyn NodeProcessor, spec: &NodeSpec, input: &[f32]) {
@@ -227,6 +283,11 @@ mod tests {
         let frame = reader.latest().unwrap();
         assert_eq!(frame.x_step, 4.0);
         assert_eq!(frame.samples, [3.0]);
+        assert_eq!(frame.trace, PlotTrace::Interpolated);
+
+        process(processor.as_mut(), &spec, &[1.0, 2.0]);
+        reader.poll();
+        assert_eq!(reader.latest().unwrap().trace, PlotTrace::Lines);
     }
 
     #[test]
@@ -245,6 +306,34 @@ mod tests {
         process(processor.as_mut(), &spec, &[1.0, 2.0]);
         reader.poll();
         assert_eq!(reader.latest().unwrap().samples, [1.0, 2.0]);
+    }
+
+    #[test]
+    fn beams_arrive_one_after_another() {
+        /// Publishes its input as two beams, its halves.
+        struct TwoBeams;
+
+        impl NodeProcessor for TwoBeams {
+            fn process(&mut self, io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
+                io.plot_beams(SCREEN, 1.0, io.input(0), 2, PlotTrace::Lines)
+            }
+        }
+
+        let spec = spec();
+        let (mut processor, mut readers) = with_plots(Box::new(TwoBeams), 1);
+        process(processor.as_mut(), &spec, &[1.0, 2.0, 3.0, 4.0]);
+        readers[0].poll();
+
+        let frame = readers[0].latest().unwrap();
+        assert_eq!(frame.beams, 2);
+        assert_eq!(
+            frame.beams().collect::<Vec<_>>(),
+            [&[1.0, 2.0][..], &[3.0, 4.0]]
+        );
+        let full = vec![0.5; 2 * MAX_PLOT_POINTS];
+        process(processor.as_mut(), &spec, &full);
+        readers[0].poll();
+        assert_eq!(readers[0].latest().unwrap().samples, full, "both beams fit");
     }
 
     #[test]

@@ -80,6 +80,9 @@ impl Node {
 /// [`NodeSpec::validate`]): a generator may take modulation inputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NodeKind {
+    /// A node whose signal comes from outside: the host fills its outputs with what a
+    /// device takes in (silence when nothing does) before it runs. It has no inputs.
+    Input,
     /// A node that generates a signal.
     Generator,
     /// A node that processes a signal.

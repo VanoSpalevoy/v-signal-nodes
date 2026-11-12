@@ -96,19 +96,31 @@ fn show_execution(app: &VSignalNodesApp, ui: &mut egui::Ui) {
         _ => {}
     }
     if execution.is_running_realtime() {
-        ui.label(language.text(Text::RunningRealtime));
+        let mut running = language.text(Text::RunningRealtime).to_owned();
+        if execution.is_taking_input() {
+            running = format!("{running}, {}", language.text(Text::TakingInput));
+        }
+        ui.label(running);
     }
     if execution.is_running_one_pass() {
         ui.label(language.text(Text::RunningOnePass));
     }
     if let Some(summary) = execution.one_pass_result() {
-        ui.label(format!(
+        let mut result = format!(
             "{}: {} / {:.0} ms / {:.3}",
             language.text(Text::OnePassResult),
             summary.frames,
             summary.elapsed.as_secs_f64() * 1000.0,
             summary.peak,
-        ));
+        );
+        if let Some(path) = &summary.written {
+            result = format!(
+                "{result}, {} {}",
+                language.text(Text::WrittenTo),
+                path.display()
+            );
+        }
+        ui.label(result);
     }
     if let Some(failure) = execution.failure() {
         ui.colored_label(

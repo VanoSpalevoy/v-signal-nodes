@@ -145,17 +145,19 @@ fn builtin_plugins() -> PluginHost {
     host
 }
 
-/// Every node type of `plugins`, in palette order: generators, then processors, then
-/// outputs and instruments (the order a signal flows), by type id within each group.
+/// Every node type of `plugins`, in palette order: inputs, generators, then
+/// processors, then outputs and instruments (the order a signal flows), by type id
+/// within each group.
 fn palette(plugins: &PluginHost) -> Vec<NodeKind> {
     use v_signal_nodes_core::NodeKind as Role;
     let mut kinds: Vec<_> = plugins.specs().cloned().map(NodeKind::new).collect();
     // `specs` is already sorted by type id and the sort is stable.
     kinds.sort_by_key(|kind| match kind.spec().kind {
-        Role::Generator => 0,
-        Role::Processor => 1,
-        Role::Output => 2,
-        Role::Instrument => 3,
+        Role::Input => 0,
+        Role::Generator => 1,
+        Role::Processor => 2,
+        Role::Output => 3,
+        Role::Instrument => 4,
     });
     kinds
 }
@@ -503,10 +505,7 @@ impl eframe::App for VSignalNodesApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use v_signal_nodes_plugin_std::{
-        AMPLIFIER, DEVICE_OUTPUT, DUAL_BEAM_OSCILLOSCOPE, GENERATOR, OSCILLOSCOPE,
-        SUMMING_AMPLIFIER,
-    };
+    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, OSCILLOSCOPE, SUMMING_AMPLIFIER};
 
     /// Adds a node of type `type_id` at `pos` (or the nearest free spot).
     pub(super) fn add(app: &mut VSignalNodesApp, type_id: &str, pos: egui::Pos2) -> NodeId {
@@ -921,24 +920,32 @@ mod tests {
 
     #[test]
     fn palette_lists_every_plugin_node_in_signal_order() {
+        use v_signal_nodes_core::NodeKind as Role;
         let app = VSignalNodesApp::default();
-        let type_ids: Vec<_> = app
+        let role = |kind: &NodeKind| match kind.spec().kind {
+            Role::Input => 0,
+            Role::Generator => 1,
+            Role::Processor => 2,
+            Role::Output => 3,
+            Role::Instrument => 4,
+        };
+
+        // Every spec once, whatever the plugins hold.
+        let mut listed: Vec<_> = app
             .palette
             .iter()
-            .map(|kind| kind.spec().type_id.as_str())
+            .map(|kind| &kind.spec().type_id)
             .collect();
-
-        assert_eq!(
-            type_ids,
-            [
-                GENERATOR,
-                AMPLIFIER,
-                SUMMING_AMPLIFIER,
-                DEVICE_OUTPUT,
-                DUAL_BEAM_OSCILLOSCOPE,
-                OSCILLOSCOPE
-            ]
-        );
+        let mut loaded: Vec<_> = app.plugins.specs().map(|spec| &spec.type_id).collect();
+        listed.sort();
+        loaded.sort();
+        assert_eq!(listed, loaded);
+        // By role in signal order, by type id within a role.
+        for pair in app.palette.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            let order = (role(a), &a.spec().type_id) < (role(b), &b.spec().type_id);
+            assert!(order, "{} before {}", a.spec().type_id, b.spec().type_id);
+        }
     }
 
     #[test]

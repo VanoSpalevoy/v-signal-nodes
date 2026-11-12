@@ -94,6 +94,8 @@ const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(124, 130, 144);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(108, 168, 255);
 /// Errors and destructive actions.
 const DANGER: egui::Color32 = egui::Color32::from_rgb(235, 96, 96);
+/// Color of inputs ([`node_color`]).
+const INPUT_YELLOW: egui::Color32 = egui::Color32::from_rgb(226, 190, 80);
 /// Color of generators ([`node_color`]), also of the second beam of a plot.
 const GENERATOR_GREEN: egui::Color32 = egui::Color32::from_rgb(82, 196, 126);
 /// Color of processors ([`node_color`]).
@@ -199,14 +201,15 @@ fn visuals() -> egui::Visuals {
 /// tint and socket dots, and the drop preview, so a kind is recognizable everywhere.
 ///
 /// The spec's own [`NodeSpec::color`] if it sets one, else decided by the node's
-/// role (`core::NodeKind`): generators green, processors violet, outputs orange,
-/// instruments cyan.
+/// role (`core::NodeKind`): inputs yellow, generators green, processors violet,
+/// outputs orange, instruments cyan.
 fn node_color(spec: &NodeSpec) -> egui::Color32 {
     use v_signal_nodes_core::NodeKind as Role;
     if let Some(color) = spec.color {
         return egui::Color32::from_rgb(color.r, color.g, color.b);
     }
     match spec.kind {
+        Role::Input => INPUT_YELLOW,
         Role::Generator => GENERATOR_GREEN,
         Role::Processor => PROCESSOR_VIOLET,
         Role::Output => OUTPUT_ORANGE,

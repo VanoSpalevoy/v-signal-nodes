@@ -21,7 +21,9 @@
 //! [`MAX_CHANNELS`], [`ParamSpec`], [`ParamKind`], [`WindowSpec`], [`WindowContent`],
 //! [`MAX_PLOT_POINTS`], [`MAX_PLOT_BEAMS`],
 //! [`Unit`], [`TextKey`], [`Translation`]), [`ParamValue`] and the typed keys
-//! ([`ParamKey`], [`NumberParam`], [`ChoiceParam`], [`ToggleParam`], [`PlotWindow`]).
+//! ([`ParamKey`], [`NumberParam`], [`ChoiceParam`], [`ToggleParam`], [`PlotWindow`]),
+//! among them the keys of the parameters the host reads itself on nodes that meet a
+//! device ([`FULL_SCALE`], [`DEFAULT_FULL_SCALE`], [`DEVICE_CHANNEL`]).
 //! A change to any of them is a change to the
 //! plugin API. The rest of `core` (the graph-side `Node`, `Error`) is the host's business and isn't exposed; plugins report errors
 //! with [`PluginError`]. Dynamic libraries don't see the Rust types at all, only
@@ -94,9 +96,10 @@ pub mod ffi;
 pub mod testing;
 
 pub use v_signal_nodes_core::{
-    ChoiceParam, MAX_CHANNELS, MAX_PLOT_BEAMS, MAX_PLOT_POINTS, NodeKind, NodeSocket, NodeSpec,
-    NumberParam, ParamKey, ParamKind, ParamSpec, ParamValue, PlotWindow, Rgb, SignalRate,
-    SocketDirection, TextKey, ToggleParam, Translation, Unit, WindowContent, WindowSpec,
+    ChoiceParam, DEFAULT_FULL_SCALE, DEVICE_CHANNEL, FULL_SCALE, MAX_CHANNELS, MAX_PLOT_BEAMS,
+    MAX_PLOT_POINTS, NodeKind, NodeSocket, NodeSpec, NumberParam, ParamKey, ParamKind, ParamSpec,
+    ParamValue, PlotWindow, Rgb, SignalRate, SocketDirection, TextKey, ToggleParam, Translation,
+    Unit, WindowContent, WindowSpec,
 };
 
 /// Version of this API. The host refuses dynamic libraries built against another
@@ -106,25 +109,118 @@ pub use v_signal_nodes_core::{
 /// Bump it on any change to the traits or to the [`ffi`] types.
 pub const API_VERSION: u32 = 7;
 
+/// Longest message a [`PluginError`] keeps, in bytes. A longer one is cut at a
+/// character boundary and ends with "…". The error, also with a node id and more
+/// beside it as in a host's errors, stays within 128 bytes, the size past which clippy
+/// calls a `Result`'s error too large (`result_large_err`), so returning it gets no
+/// warning.
+pub const MAX_ERROR_LEN: usize = 104;
+const _: () = assert!(size_of::<PluginError>() <= 112);
+
 /// An error reported by a plugin.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PluginError(String);
+///
+/// Its message lives in the error itself, at most [`MAX_ERROR_LEN`] bytes, so making,
+/// returning and passing one on allocates nothing: `process` may fail on the real-time
+/// thread. Build messages with `format_args!` rather than `format!`, which allocates:
+///
+/// ```ignore
+/// return Err(PluginError::new(format_args!("no option {index}")));
+/// ```
+#[derive(Clone)]
+pub struct PluginError {
+    /// UTF-8, `len` bytes of it.
+    bytes: [u8; MAX_ERROR_LEN],
+    len: u8,
+}
+const _: () = assert!(MAX_ERROR_LEN <= u8::MAX as usize);
 
 impl PluginError {
-    /// An error with `message`.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+    /// An error with `message`, written into the error: `&str`, `format_args!(..)` or
+    /// anything else that displays.
+    pub fn new(message: impl fmt::Display) -> Self {
+        let mut error = Self {
+            bytes: [0; MAX_ERROR_LEN],
+            len: 0,
+        };
+        let mut message_writer = MessageWriter {
+            error: &mut error,
+            cut: false,
+        };
+        let _ = fmt::write(&mut message_writer, format_args!("{message}"));
+        if message_writer.cut {
+            error.end_with_ellipsis();
+        }
+        error
     }
 
     /// What went wrong.
     pub fn message(&self) -> &str {
-        &self.0
+        // Only whole characters of `&str`s go in (`MessageWriter`), so this is
+        // always valid; nothing to show otherwise.
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+
+    /// Appends `text`, as much of it as fits in whole characters; `false` if not all.
+    fn push(&mut self, text: &str) -> bool {
+        let len = usize::from(self.len);
+        let mut taken = text.len().min(MAX_ERROR_LEN - len);
+        while !text.is_char_boundary(taken) {
+            taken -= 1;
+        }
+        self.bytes[len..len + taken].copy_from_slice(&text.as_bytes()[..taken]);
+        // At most `MAX_ERROR_LEN`, which fits a `u8`.
+        self.len = (len + taken) as u8;
+        taken == text.len()
+    }
+
+    /// Cuts the message so "…" fits after it, then adds it.
+    fn end_with_ellipsis(&mut self) {
+        const ELLIPSIS: &str = "…";
+        let mut len = usize::from(self.len).min(MAX_ERROR_LEN - ELLIPSIS.len());
+        while !self.message().is_char_boundary(len) {
+            len -= 1;
+        }
+        // Shorter than before, so it fits a `u8`.
+        self.len = len as u8;
+        self.push(ELLIPSIS);
     }
 }
 
+/// Writes a message into a [`PluginError`], whole characters only, until it's full.
+struct MessageWriter<'a> {
+    error: &'a mut PluginError,
+    /// Whether some of the message didn't fit.
+    cut: bool,
+}
+
+impl fmt::Write for MessageWriter<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if self.error.push(text) {
+            return Ok(());
+        }
+        self.cut = true;
+        // Nothing more fits: stop formatting.
+        Err(fmt::Error)
+    }
+}
+
+impl fmt::Debug for PluginError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PluginError").field(&self.message()).finish()
+    }
+}
+
+impl PartialEq for PluginError {
+    fn eq(&self, other: &Self) -> bool {
+        self.message() == other.message()
+    }
+}
+
+impl Eq for PluginError {}
+
 impl fmt::Display for PluginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.message())
     }
 }
 
@@ -132,7 +228,7 @@ impl std::error::Error for PluginError {}
 
 impl From<PluginError> for v_signal_nodes_core::Error {
     fn from(err: PluginError) -> Self {
-        Self::Plugin(err.0)
+        Self::Plugin(err.message().to_owned())
     }
 }
 
@@ -376,7 +472,7 @@ impl<'a> ProcessIo<'a> {
             .and_then(|index| self.params.get(index))
             .and_then(|&value| key.read(value))
             .ok_or_else(|| {
-                PluginError::new(format!(
+                PluginError::new(format_args!(
                     "parameter '{}' is missing or of another kind",
                     key.id()
                 ))
@@ -460,10 +556,10 @@ impl<'a> ProcessIo<'a> {
         trace: PlotTrace,
     ) -> Result<(), PluginError> {
         let Some(index) = self.spec.window_index(key.0) else {
-            return Err(PluginError::new(format!("no window '{}'", key.0)));
+            return Err(PluginError::new(format_args!("no window '{}'", key.0)));
         };
         if !(1..=MAX_PLOT_BEAMS).contains(&beams) || !samples.len().is_multiple_of(beams) {
-            return Err(PluginError::new(format!(
+            return Err(PluginError::new(format_args!(
                 "{} samples don't make {beams} beams",
                 samples.len()
             )));
@@ -549,6 +645,25 @@ mod tests {
             .input(NodeSocket::control_in("control").with_channels(2))
             .output(NodeSocket::signal_out("out").with_channels(2))
             .param(LEVEL.spec("Level", 0.0, 1.0, 0.5))
+    }
+
+    #[test]
+    fn errors_keep_their_message_and_cut_a_long_one_at_a_character() {
+        let error = PluginError::new(format_args!("block {} failed", 7));
+        assert_eq!(error.message(), "block 7 failed");
+        assert_eq!(error, PluginError::new("block 7 failed"));
+        assert_eq!(format!("{error:?}"), "PluginError(\"block 7 failed\")");
+
+        let exact = "x".repeat(MAX_ERROR_LEN);
+        assert_eq!(PluginError::new(&exact).message(), exact, "just fits");
+
+        // Two bytes per letter: the cut can't fall inside one.
+        let long = "ж".repeat(MAX_ERROR_LEN);
+        let cut = PluginError::new(&long);
+        assert!(cut.message().len() <= MAX_ERROR_LEN);
+        assert!(cut.message().ends_with("ж…"), "{}", cut.message());
+        let cut = PluginError::new(format_args!("{}{}", "a", long));
+        assert!(cut.message().starts_with("aж") && cut.message().ends_with('…'));
     }
 
     #[test]

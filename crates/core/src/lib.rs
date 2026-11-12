@@ -23,10 +23,12 @@ pub mod plan;
 pub use crate::error::{Error, ParamProblem, SpecProblem};
 pub use graph::{Graph, GraphError, InputRef, NodeId, OutputRef};
 pub use model::{
-    ChoiceParam, MAX_CHANNELS, MAX_PLOT_BEAMS, MAX_PLOT_POINTS, Node, NodeKind, NodeSocket,
-    NodeSpec, NumberParam, ParamKey, ParamKind, ParamSpec, ParamValue, PlotWindow, Rgb, SignalRate,
-    SocketDirection, TextKey, ToggleParam, Translation, Unit, WindowContent, WindowSpec,
+    ChoiceParam, DEFAULT_FULL_SCALE, DEVICE_CHANNEL, FULL_SCALE, MAX_CHANNELS, MAX_PLOT_BEAMS,
+    MAX_PLOT_POINTS, Node, NodeKind, NodeSocket, NodeSpec, NumberParam, ParamKey, ParamKind,
+    ParamSpec, ParamValue, PlotWindow, Rgb, SignalRate, SocketDirection, TextKey, ToggleParam,
+    Translation, Unit, WindowContent, WindowSpec,
 };
 pub use plan::{
-    BufferId, BufferShape, CompileError, Conversion, Input, Plan, PlanOutput, Step, compile,
+    BufferId, BufferShape, CompileError, Conversion, Input, Plan, PlanInput, PlanOutput, Step,
+    compile,
 };

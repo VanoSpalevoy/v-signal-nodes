@@ -15,16 +15,18 @@
 //! Rules on the real-time thread: no allocation, no locks, no panics, no dropping of
 //! anything big. So the queues are lock-free and fixed in size ([`rtrb`]), a processor
 //! is created and prepared before it gets there, and a replaced engine travels back
-//! to be dropped. The exception is failing: a processor's error message is a `String`
-//! and a caught panic allocates, but after that the [`Renderer`] outputs silence
-//! until the next engine, so that happens once.
+//! to be dropped. A failing processor allocates nothing either (its error keeps the
+//! message inline); a panicking one does, in Rust's panic machinery, but after that
+//! the [`Renderer`] outputs silence until the next engine, so that happens once.
 //!
 //! A failed processor doesn't go on to the next engine: its state may be what made
 //! it fail, so the [`Controller`] creates its node a new one with the next plan.
 //!
-//! Output nodes: every input of every output node is summed into the device's
-//! channels ([`mix_into`]); the sum is limited to `-1.0..=1.0`, what a device takes.
-//! Control-rate inputs aren't delivered, they have no samples.
+//! Output nodes: every input of every output node, divided by the node's full scale,
+//! is summed into the device's channels ([`Engine::mix_outputs`], [`mix_into`]); the
+//! sum is limited to `-1.0..=1.0`, what a device takes. Control-rate inputs aren't
+//! delivered, they have no samples. Input nodes get what an [`InputSource`] (an input
+//! device) takes in, read before each block ([`Engine::feed_from_device`]).
 //!
 //! The device backend lives outside this crate, as a driver calling
 //! [`Renderer::render`], so all of this is testable offline.
@@ -33,7 +35,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use rtrb::{Consumer, Producer, RingBuffer};
-use v_signal_nodes_core::{NodeId, ParamValue, Plan, SignalRate, Step};
+use v_signal_nodes_core::{NodeId, ParamValue, Plan, Step};
 use v_signal_nodes_plugin_api::NodeProcessor;
 
 use crate::engine::step_nodes;
@@ -100,6 +102,9 @@ pub fn channel(sample_rate: f32, max_frames: usize) -> (Controller, Renderer) {
         engine: None,
         replaces_applied: 0,
         failed: false,
+        max_frames,
+        input: None,
+        taken: Vec::new(),
     };
     (controller, renderer)
 }
@@ -257,6 +262,31 @@ pub struct Renderer {
     replaces_applied: u64,
     /// The engine failed: don't run it again until it's replaced.
     failed: bool,
+    max_frames: usize,
+    /// Where the input nodes' signal comes from, if anywhere.
+    input: Option<Input>,
+    /// What `input` gave for the current block, interleaved; sized for `max_frames`.
+    taken: Vec<f32>,
+}
+
+/// An [`InputSource`] with its channel count, read once at [`Renderer::set_input`].
+struct Input {
+    source: Box<dyn InputSource>,
+    channels: usize,
+}
+
+/// What a device takes in, for the input nodes ([`NodeKind::Input`]): read on the
+/// real-time thread before each block, so it mustn't allocate, lock or block.
+///
+/// [`NodeKind::Input`]: v_signal_nodes_core::NodeKind::Input
+pub trait InputSource: Send {
+    /// Channels per frame of what [`read`](Self::read) gives; fixed.
+    fn channels(&self) -> usize;
+
+    /// Fills `samples`, interleaved, [`channels`](Self::channels) per frame and within
+    /// ±1, with the next frames at the renderer's sample rate; zeros for frames that
+    /// aren't there (yet).
+    fn read(&mut self, samples: &mut [f32]);
 }
 
 impl Renderer {
@@ -264,6 +294,15 @@ impl Renderer {
     /// prepared with. A device running at another rate has to resample.
     pub fn sample_rate(&self) -> f32 {
         self.sample_rate
+    }
+
+    /// Feeds the input nodes from `source` from now on: before each block it reads as
+    /// many frames ([`Engine::feed_from_device`]). Without one they get silence. Call
+    /// it before the renderer goes to the real-time thread: it allocates.
+    pub fn set_input(&mut self, source: Box<dyn InputSource>) {
+        let channels = source.channels().max(1);
+        self.taken = vec![0.0; self.max_frames * channels];
+        self.input = Some(Input { source, channels });
     }
 
     /// Fills `device`, interleaved with `channels` channels per frame: applies waiting
@@ -282,6 +321,11 @@ impl Renderer {
         if !self.failed && block_len > 0 {
             for block in device.chunks_mut(block_len) {
                 let frames = block.len() / channels;
+                if let Some(input) = &mut self.input {
+                    let taken = &mut self.taken[..frames * input.channels];
+                    input.source.read(taken);
+                    engine.feed_from_device(taken, input.channels, frames);
+                }
                 if let Err(error) = engine.process(frames) {
                     self.failed = true;
                     self.send(Event::Failed {
@@ -291,16 +335,7 @@ impl Renderer {
                     block.fill(0.0);
                     break;
                 }
-                for output in engine.plan().outputs() {
-                    if output.shape.rate == SignalRate::Sample {
-                        mix_into(
-                            block,
-                            channels,
-                            engine.delivered(output, frames),
-                            usize::from(output.shape.channels),
-                        );
-                    }
-                }
+                engine.mix_outputs(block, channels, frames);
             }
         }
         self.engine = Some(engine);
@@ -350,16 +385,17 @@ impl Renderer {
     }
 }
 
-/// Adds `signal` (a socket's buffer: `signal_channels` channels one after another) to
-/// the interleaved `device`, `device_channels` per frame: mono goes to every device
-/// channel, channel `c` to device channel `c`; on a mono device all channels are
-/// averaged. Device channels without a signal channel get nothing, and signal
-/// channels without a device channel are left out.
+/// Adds `signal` (a socket's buffer: `signal_channels` channels one after another)
+/// times `gain` to the interleaved `device`, `device_channels` per frame: mono goes to
+/// every device channel, channel `c` to device channel `c`; on a mono device all
+/// channels are averaged. Device channels without a signal channel get nothing, and
+/// signal channels without a device channel are left out.
 pub fn mix_into(
     device: &mut [f32],
     device_channels: usize,
     signal: &[f32],
     signal_channels: usize,
+    gain: f32,
 ) {
     if device_channels == 0 || signal_channels == 0 {
         return;
@@ -371,11 +407,11 @@ pub fn mix_into(
     if signal_channels == 1 {
         for (frame, &sample) in device.chunks_exact_mut(device_channels).zip(signal) {
             for out in frame {
-                *out += sample;
+                *out += sample * gain;
             }
         }
     } else if device_channels == 1 {
-        let scale = 1.0 / signal_channels as f32;
+        let scale = gain / signal_channels as f32;
         for channel in signal.chunks_exact(frames).take(signal_channels) {
             for (out, sample) in device.iter_mut().zip(channel) {
                 *out += sample * scale;
@@ -385,7 +421,7 @@ pub fn mix_into(
         let channels = signal.chunks_exact(frames).take(device_channels);
         for (index, channel) in channels.enumerate() {
             for (frame, sample) in device.chunks_exact_mut(device_channels).zip(channel) {
-                frame[index] += sample;
+                frame[index] += sample * gain;
             }
         }
     }
@@ -394,9 +430,9 @@ pub fn mix_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use v_signal_nodes_core::{Graph, InputRef, OutputRef, compile};
+    use v_signal_nodes_core::{DEVICE_CHANNEL, FULL_SCALE, Graph, InputRef, OutputRef, compile};
     use v_signal_nodes_plugin_host::PluginHost;
-    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_OUTPUT, GENERATOR, StdPlugin};
+    use v_signal_nodes_plugin_std::{AMPLIFIER, DEVICE_INPUT, DEVICE_OUTPUT, GENERATOR, StdPlugin};
 
     const MAX_FRAMES: usize = 64;
 
@@ -749,28 +785,106 @@ mod tests {
     fn signals_are_mixed_into_device_channels() {
         // Mono into every channel, added to what's there.
         let mut device = [1.0, 1.0, 1.0, 1.0];
-        mix_into(&mut device, 2, &[0.5, 0.25], 1);
+        mix_into(&mut device, 2, &[0.5, 0.25], 1, 1.0);
         assert_eq!(device, [1.5, 1.5, 1.25, 1.25]);
 
         // Stereo, channels one after another, into interleaved.
         let mut device = [0.0; 4];
-        mix_into(&mut device, 2, &[1.0, 2.0, 3.0, 4.0], 2);
+        mix_into(&mut device, 2, &[1.0, 2.0, 3.0, 4.0], 2, 1.0);
         assert_eq!(device, [1.0, 3.0, 2.0, 4.0]);
 
         // Stereo on a mono device: averaged.
         let mut device = [0.0; 2];
-        mix_into(&mut device, 1, &[1.0, 2.0, 3.0, 4.0], 2);
+        mix_into(&mut device, 1, &[1.0, 2.0, 3.0, 4.0], 2, 1.0);
         assert_eq!(device, [2.0, 3.0]);
 
         // Stereo on four channels: the rest stay silent.
         let mut device = [0.0; 4];
-        mix_into(&mut device, 4, &[1.0, 2.0], 2);
+        mix_into(&mut device, 4, &[1.0, 2.0], 2, 1.0);
         assert_eq!(device, [1.0, 2.0, 0.0, 0.0]);
 
         // Four channels on stereo: the rest are left out.
         let mut device = [0.0; 2];
-        mix_into(&mut device, 2, &[1.0, 2.0, 3.0, 4.0], 4);
+        mix_into(&mut device, 2, &[1.0, 2.0, 3.0, 4.0], 4, 1.0);
         assert_eq!(device, [1.0, 2.0]);
+
+        // Scaled on the way.
+        let mut device = [0.0; 2];
+        mix_into(&mut device, 1, &[1.0, 2.0, 3.0, 4.0], 2, 0.5);
+        assert_eq!(device, [1.0, 1.5]);
+    }
+
+    /// Gives frames counting up: channel `c` of frame `f` is `f / 1000 + c / 10`, so
+    /// every sample tells where it came from.
+    struct Counting {
+        channels: usize,
+        frame: usize,
+    }
+
+    impl InputSource for Counting {
+        fn channels(&self) -> usize {
+            self.channels
+        }
+
+        fn read(&mut self, samples: &mut [f32]) {
+            for frame in samples.chunks_exact_mut(self.channels) {
+                for (channel, sample) in frame.iter_mut().enumerate() {
+                    *sample = self.frame as f32 / 1000.0 + channel as f32 / 10.0;
+                }
+                self.frame += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn input_nodes_get_their_device_channel_in_volts() {
+        let mut run = Run::new();
+        run.renderer.set_input(Box::new(Counting {
+            channels: 2,
+            frame: 0,
+        }));
+        let input = run.add(DEVICE_INPUT);
+        let sink = run.add(DEVICE_OUTPUT);
+        run.connect(input, sink);
+        // The second channel, 10 V full scale in, 20 V out: half of it reaches the
+        // device.
+        run.graph
+            .set_param(input, DEVICE_CHANNEL.0, ParamValue::Choice(1))
+            .unwrap();
+        run.graph
+            .set_param(input, FULL_SCALE.0, ParamValue::Number(10.0))
+            .unwrap();
+        run.graph
+            .set_param(sink, FULL_SCALE.0, ParamValue::Number(20.0))
+            .unwrap();
+        run.send_plan().unwrap();
+
+        // Across engine blocks: the source is read block by block.
+        let device = run.render(MAX_FRAMES + 3);
+
+        for (frame, [left, right]) in device.as_chunks::<2>().0.iter().enumerate() {
+            let expected = (frame as f32 / 1000.0 + 0.1) * 10.0 / 20.0;
+            assert!((left - expected).abs() < 1e-6, "{frame}: {left} {expected}");
+            assert_eq!(left, right, "mono to both");
+        }
+    }
+
+    #[test]
+    fn input_nodes_past_the_devices_channels_are_silent() {
+        let mut run = Run::new();
+        run.renderer.set_input(Box::new(Counting {
+            channels: 1,
+            frame: 5,
+        }));
+        let input = run.add(DEVICE_INPUT);
+        let sink = run.add(DEVICE_OUTPUT);
+        run.connect(input, sink);
+        run.graph
+            .set_param(input, DEVICE_CHANNEL.0, ParamValue::Choice(1))
+            .unwrap();
+        run.send_plan().unwrap();
+
+        assert_eq!(run.render(4), [0.0; 8]);
     }
 
     #[test]

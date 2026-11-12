@@ -45,6 +45,9 @@ pub(super) enum Command {
     StopRealtime,
     /// Runs the graph once on background threads, independent branches in parallel.
     RunAsync,
+    /// Runs the graph once like [`RunAsync`](Self::RunAsync) and writes what the
+    /// output nodes deliver to a WAV file chosen in the system's save dialog.
+    RecordToFile,
 }
 
 /// A top-level menu of the menu bar.
@@ -78,7 +81,11 @@ impl Menu {
                 Command::ResetZoom,
                 Command::SnapToGrid,
             ],
-            Self::Run => &[Command::RunRealtime, Command::RunAsync],
+            Self::Run => &[
+                Command::RunRealtime,
+                Command::RunAsync,
+                Command::RecordToFile,
+            ],
         }
     }
 }
@@ -96,6 +103,7 @@ impl Command {
             Self::RunRealtime => Text::RunRealtime,
             Self::StopRealtime => Text::StopRealtime,
             Self::RunAsync => Text::RunAsync,
+            Self::RecordToFile => Text::RecordToFile,
         }
     }
 
@@ -128,6 +136,9 @@ impl Command {
             // In no menu, so nothing would read a shortcut: Space is `RunRealtime`'s.
             Self::StopRealtime => &[],
             Self::RunAsync => const { &[key(Modifiers::COMMAND, Key::Enter)] },
+            Self::RecordToFile => {
+                const { &[key(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Enter)] }
+            }
         }
     }
 }
@@ -148,7 +159,7 @@ impl VSignalNodesApp {
                 self.execution.is_running_realtime() || self.execution.compile_error().is_none()
             }
             Command::StopRealtime => self.execution.is_running_realtime(),
-            Command::RunAsync => {
+            Command::RunAsync | Command::RecordToFile => {
                 !self.execution.is_running_one_pass() && self.execution.compile_error().is_none()
             }
         }
@@ -169,7 +180,17 @@ impl VSignalNodesApp {
             Command::ResetZoom => self.set_scale(1.0),
             Command::RunRealtime => self.toggle_realtime(),
             Command::StopRealtime => self.stop_realtime(),
-            Command::RunAsync => self.start_one_pass(),
+            Command::RunAsync => self.start_one_pass(None),
+            Command::RecordToFile => {
+                // Blocks this frame until the dialog closes; nothing happens on cancel.
+                let path = rfd::FileDialog::new()
+                    .add_filter("WAV", &["wav"])
+                    .set_file_name("signal.wav")
+                    .save_file();
+                if let Some(path) = path {
+                    self.start_one_pass(Some(path));
+                }
+            }
         }
     }
 
@@ -211,6 +232,7 @@ mod tests {
             Command::ResetZoom,
             Command::RunRealtime,
             Command::RunAsync,
+            Command::RecordToFile,
         ];
         for command in all {
             let menus = Menu::ALL

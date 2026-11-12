@@ -24,12 +24,14 @@ use std::slice;
 use std::sync::{Condvar, Mutex};
 use std::thread;
 
+use v_signal_nodes_core::model::device;
 use v_signal_nodes_core::{
-    BufferId, BufferShape, Input, NodeId, OutputRef, ParamValue, Plan, PlanOutput, Step,
+    BufferId, BufferShape, Input, NodeId, OutputRef, ParamValue, Plan, PlanOutput, SignalRate, Step,
 };
 use v_signal_nodes_plugin_api::{NodeProcessor, PluginError, ProcessIo, RawBuffer};
 
 use crate::RuntimeError;
+use crate::realtime::mix_into;
 
 /// A plan with one prepared processor per step and the buffers between them.
 pub struct Engine {
@@ -52,6 +54,14 @@ pub struct Engine {
     /// Frames processed so far, the time of the run: nodes get it through
     /// [`ProcessIo::position`], and the engine replacing this one goes on from it.
     position: u64,
+    /// What the host fed the input nodes ([`feed`](Self::feed)), one slot per
+    /// [`Plan::inputs`] entry laid out for `max_frames`, back to back; zeros until fed.
+    fed: Vec<f32>,
+    /// Where each slot of `fed` starts, by index in [`Plan::inputs`].
+    fed_offsets: Vec<usize>,
+    /// For each step, the index in [`Plan::inputs`] of its first output if it's an
+    /// input node: its outputs' slots follow one another from there.
+    fed_first: Vec<Option<usize>>,
 }
 
 // SAFETY: the only non-`Send` fields are the `RawBuffer` scratch vectors. Their
@@ -162,7 +172,19 @@ impl Engine {
         let most = |count: fn(&Step) -> usize| plan.steps().iter().map(count).max().unwrap_or(0);
         let (max_inputs, max_outputs) = (most(|s| s.inputs.len()), most(|s| s.outputs.len()));
 
+        let mut fed_offsets = Vec::with_capacity(plan.inputs().len());
+        let mut fed_len = 0;
+        let mut fed_first = vec![None; plan.steps().len()];
+        for (index, input) in plan.inputs().iter().enumerate() {
+            fed_offsets.push(fed_len);
+            fed_len += input.shape.buffer_len(max_frames);
+            fed_first[input.step].get_or_insert(index);
+        }
+
         Ok(Self {
+            fed: vec![0.0; fed_len],
+            fed_offsets,
+            fed_first,
             plan,
             processors: ordered,
             pool: vec![0.0; pool_len],
@@ -212,22 +234,107 @@ impl Engine {
         Ok(())
     }
 
-    /// Processes one block of `frames`: every step in order, outputs zeroed first.
-    /// Stops at the first failing processor.
+    /// Where the host puts what input [`Plan::inputs`]`[input]` gets in the next block
+    /// of `frames`: its channels one after another, [`BufferShape::buffer_len`] long.
+    /// The node's outputs start with it instead of zeros. What isn't fed again stays
+    /// for the next blocks; an engine starts with zeros. Panics if there's no such
+    /// input; `frames` is capped at [`max_frames`](Self::max_frames).
+    pub fn feed(&mut self, input: usize, frames: usize) -> &mut [f32] {
+        let shape = self.plan.inputs()[input].shape;
+        let start = self.fed_offsets[input];
+        &mut self.fed[start..start + shape.buffer_len(frames.min(self.max_frames))]
+    }
+
+    /// [`feed`](Self::feed)s every input node from a device's `frames` frames:
+    /// `device` is interleaved, `channels` per frame, values within ±1 at full
+    /// scale. A node's channel `c` takes device channel [`DEVICE_CHANNEL`] + `c`
+    /// (silence past the device's last) times its [`FULL_SCALE`], so it gets volts;
+    /// a control-rate one takes the block's last frame. Allocates nothing.
+    ///
+    /// [`DEVICE_CHANNEL`]: v_signal_nodes_core::DEVICE_CHANNEL
+    /// [`FULL_SCALE`]: v_signal_nodes_core::FULL_SCALE
+    pub fn feed_from_device(&mut self, device: &[f32], channels: usize, frames: usize) {
+        let frames = frames.min(self.max_frames);
+        if channels == 0 || frames == 0 || device.len() < frames * channels {
+            return;
+        }
+        for index in 0..self.plan.inputs().len() {
+            let input = self.plan.inputs()[index];
+            let step = &self.plan.steps()[input.step];
+            let first = device::device_channel(&step.spec, &step.params);
+            let scale = device::full_scale(&step.spec, &step.params);
+            let channel_len = input.shape.channel_len(frames);
+            let slot = self.feed(index, frames);
+            for (offset, channel) in slot.chunks_exact_mut(channel_len).enumerate() {
+                let source = first + offset;
+                if source >= channels {
+                    channel.fill(0.0);
+                    continue;
+                }
+                // A control-rate channel has one value: the last frame's.
+                let skip = frames - channel_len;
+                let samples = device[skip * channels..].chunks_exact(channels);
+                for (out, frame) in channel.iter_mut().zip(samples) {
+                    *out = frame[source] * scale;
+                }
+            }
+        }
+    }
+
+    /// Adds what every output node got in the last block of `frames` to the
+    /// interleaved `device` (`channels` per frame, see [`mix_into`]), each divided by
+    /// its node's [`FULL_SCALE`]: what a device takes, before any limiting.
+    /// Control-rate inputs carry no samples and are left out. Allocates nothing.
+    ///
+    /// [`FULL_SCALE`]: v_signal_nodes_core::FULL_SCALE
+    pub fn mix_outputs(&self, device: &mut [f32], channels: usize, frames: usize) {
+        for output in self.plan.outputs() {
+            if output.shape.rate != SignalRate::Sample {
+                continue;
+            }
+            let step = &self.plan.steps()[output.step];
+            let gain = 1.0 / device::full_scale(&step.spec, &step.params);
+            let signal = self.delivered(output, frames);
+            mix_into(
+                device,
+                channels,
+                signal,
+                usize::from(output.shape.channels),
+                gain,
+            );
+        }
+    }
+
+    /// The most channels any output node delivers (at least 1): what a file of all
+    /// outputs needs to keep them apart.
+    pub fn output_channels(&self) -> usize {
+        let outputs = self.plan.outputs().iter();
+        let sampled = outputs.filter(|output| output.shape.rate == SignalRate::Sample);
+        sampled
+            .map(|output| usize::from(output.shape.channels))
+            .max()
+            .unwrap_or(1)
+    }
+
+    /// Processes one block of `frames`: every step in order, outputs zeroed first
+    /// (input nodes': filled with what was fed). Stops at the first failing processor.
     pub fn process(&mut self, frames: usize) -> Result<(), RuntimeError> {
         self.check_frames(frames)?;
         let memory = Memory::of(
             &mut self.pool,
             &self.offsets,
             &mut self.silence,
+            Fed::of(&self.fed, &self.fed_offsets),
             self.position,
         );
         let buffers = self.plan.buffers();
-        for (step, processor) in self.plan.steps().iter().zip(&mut self.processors) {
+        let steps = self.plan.steps().iter().zip(&mut self.processors);
+        for ((step, processor), &fed) in steps.zip(&self.fed_first) {
             // SAFETY: steps run one at a time, in an order that follows `after`.
             unsafe {
                 run_step(
                     step,
+                    fed,
                     buffers,
                     processor.as_mut(),
                     &memory,
@@ -314,9 +421,11 @@ impl Engine {
                 &mut self.pool,
                 &self.offsets,
                 &mut self.silence,
+                Fed::of(&self.fed, &self.fed_offsets),
                 self.position,
             ),
         };
+        let fed_first = &self.fed_first;
         let buffers = self.plan.buffers();
         let work = || {
             let mut inputs = Vec::with_capacity(most_inputs);
@@ -340,6 +449,7 @@ impl Engine {
                     let processor = &mut *shared.processor(index);
                     run_step(
                         &steps[index],
+                        fed_first[index],
                         buffers,
                         processor.as_mut(),
                         shared.memory(),
@@ -452,11 +562,31 @@ struct Schedule {
     error: Option<RuntimeError>,
 }
 
+/// What the host fed the input nodes, read-only while a block runs.
+struct Fed<'a> {
+    samples: &'a [f32],
+    /// Where each input's slot starts, by index in [`Plan::inputs`].
+    offsets: &'a [usize],
+}
+
+impl<'a> Fed<'a> {
+    fn of(samples: &'a [f32], offsets: &'a [usize]) -> Self {
+        Self { samples, offsets }
+    }
+
+    /// The first `len` samples of input `index`'s slot.
+    fn slot(&self, index: usize, len: usize) -> &'a [f32] {
+        let start = self.offsets[index];
+        &self.samples[start..start + len]
+    }
+}
+
 /// The raw memory of one block, for steps that may run on several threads.
 struct Memory<'a> {
     pool: *mut f32,
     offsets: &'a [usize],
     silence: *mut f32,
+    fed: Fed<'a>,
     /// Frames before this block.
     position: u64,
 }
@@ -466,12 +596,14 @@ impl<'a> Memory<'a> {
         pool: &'a mut [f32],
         offsets: &'a [usize],
         silence: &'a mut [f32],
+        fed: Fed<'a>,
         position: u64,
     ) -> Self {
         Self {
             pool: pool.as_mut_ptr(),
             offsets,
             silence: silence.as_mut_ptr(),
+            fed,
             position,
         }
     }
@@ -506,7 +638,8 @@ impl Shared<'_> {
 }
 
 /// Runs `step`: its conversions, then its processor on `frames`, outputs zeroed
-/// first. A panic in the processor comes back as an error.
+/// first, or for an input node filled from its slots in `memory.fed`, the first at
+/// `fed`. A panic in the processor comes back as an error.
 ///
 /// # Safety
 ///
@@ -514,8 +647,10 @@ impl Shared<'_> {
 /// least `frames`, and be valid for the call. Every step in `step.after` must be
 /// finished and no step that uses a buffer of this step in a conflicting way may
 /// be running (following [`Step::after`] guarantees that).
+#[allow(clippy::too_many_arguments)]
 unsafe fn run_step(
     step: &Step,
+    fed: Option<usize>,
     buffers: &[BufferShape],
     processor: &mut dyn NodeProcessor,
     memory: &Memory<'_>,
@@ -556,12 +691,16 @@ unsafe fn run_step(
         });
     }
     outputs.clear();
-    for (buffer, socket) in step.outputs.iter().zip(&step.spec.outputs) {
+    for (index, (buffer, socket)) in step.outputs.iter().zip(&step.spec.outputs).enumerate() {
         let ptr = memory.start(*buffer);
         let len = socket.buffer_len(frames);
         // SAFETY: `len` ≤ the buffer's length for `max_frames`, and by the contract
         // this step is the only one using the buffer now.
-        unsafe { slice::from_raw_parts_mut(ptr, len) }.fill(0.0);
+        let output = unsafe { slice::from_raw_parts_mut(ptr, len) };
+        match fed {
+            Some(first) => output.copy_from_slice(memory.fed.slot(first + index, len)),
+            None => output.fill(0.0),
+        }
         outputs.push(RawBuffer { ptr, len });
     }
 

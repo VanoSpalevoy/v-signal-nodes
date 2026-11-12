@@ -15,8 +15,18 @@
 //!   ([`send_param`](Execution::send_param)), so moving a control is cheap.
 //! - **One pass** ([`Command::RunAsync`](super::commands::Command)): a background
 //!   thread runs the plan once over [`ONE_PASS_FRAMES`] in big blocks, branches in
-//!   parallel, and sends back a summary. There is no file output yet, so the summary
-//!   and the plot windows are what comes of it.
+//!   parallel, and sends back a summary; the plot windows show what the instruments
+//!   saw. [`Command::RecordToFile`](super::commands::Command) also records what the
+//!   output nodes deliver, as a device would get it (full scale applied, not
+//!   limited), and writes it to a WAV file ([`crate::wav`]). Input nodes are silent:
+//!   no device runs.
+//!
+//! Devices: the system's default output and input, or ones chosen by name
+//! ([`set_output_device`](VSignalNodesApp::set_output_device),
+//! [`set_input_device`](VSignalNodesApp::set_input_device); a new one starts a
+//! real-time run over). The input device runs only while the plan has input nodes,
+//! so a graph without them never asks for it; one gaining or losing them starts the
+//! run over.
 //!
 //! Both are polled once per frame by [`update`](VSignalNodesApp::update_execution).
 //! A node that fails on the device leaves it silent; after [`RETRY_DELAY`] the plan
@@ -37,6 +47,7 @@
 //! its own schedule; the last frame stays on show after a run ends.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -46,7 +57,7 @@ use eframe::egui;
 use v_signal_nodes_core::{
     CompileError, Error, Graph, NodeId, ParamValue, Plan, Step, Unit, compile,
 };
-use v_signal_nodes_device::{DeviceError, Output, OutputStream};
+use v_signal_nodes_device::{DeviceError, Input, InputStream, Output, OutputStream};
 use v_signal_nodes_plugin_host::PluginHost;
 #[cfg(test)]
 use v_signal_nodes_runtime::plots::PlotFrame;
@@ -110,6 +121,8 @@ fn make_processor(
 struct RealtimeRun {
     /// Dropped first, which stops the device before the controller goes away.
     _stream: OutputStream,
+    /// The input device, while the plan has input nodes.
+    input: Option<InputStream>,
     controller: Controller,
     device_errors: Receiver<DeviceError>,
     /// When to send the plan again because a node failed, if one did.
@@ -117,12 +130,14 @@ struct RealtimeRun {
 }
 
 /// What came of a one-pass run.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct OnePassSummary {
     pub frames: usize,
     pub elapsed: Duration,
     /// Largest absolute sample the output nodes got.
     pub peak: f32,
+    /// The file the output was written to, if it was recorded.
+    pub written: Option<PathBuf>,
 }
 
 /// The state of running the graph. Derived from nothing saved; never in a document.
@@ -135,13 +150,17 @@ pub(super) struct Execution {
     /// graph changed): send a new one.
     plan_outdated: bool,
     realtime: Option<RealtimeRun>,
-    one_pass: Option<Receiver<Result<OnePassSummary, RuntimeError>>>,
+    one_pass: Option<Receiver<Result<OnePassSummary, String>>>,
     /// The last finished one-pass run.
     one_pass_result: Option<OnePassSummary>,
     /// What went wrong with the last run, in the system's or the plugin's words.
     failure: Option<String>,
     /// Where the plots of nodes with windows arrive, one per window of the node.
     plots: HashMap<NodeId, Vec<PlotFeed>>,
+    /// The output device by name; the system's default if `None`.
+    output_device: Option<String>,
+    /// The input device by name; the system's default if `None`.
+    input_device: Option<String>,
 }
 
 impl Default for Execution {
@@ -156,6 +175,8 @@ impl Default for Execution {
             one_pass_result: None,
             failure: None,
             plots: HashMap::new(),
+            output_device: None,
+            input_device: None,
         }
     }
 }
@@ -174,8 +195,25 @@ impl Execution {
         self.one_pass.is_some()
     }
 
-    pub(super) fn one_pass_result(&self) -> Option<OnePassSummary> {
-        self.one_pass_result
+    pub(super) fn one_pass_result(&self) -> Option<&OnePassSummary> {
+        self.one_pass_result.as_ref()
+    }
+
+    /// The chosen output device's name; `None` for the system's default.
+    pub(super) fn output_device(&self) -> Option<&str> {
+        self.output_device.as_deref()
+    }
+
+    /// The chosen input device's name; `None` for the system's default.
+    pub(super) fn input_device(&self) -> Option<&str> {
+        self.input_device.as_deref()
+    }
+
+    /// Whether the input device runs now.
+    pub(super) fn is_taking_input(&self) -> bool {
+        self.realtime
+            .as_ref()
+            .is_some_and(|run| run.input.is_some())
     }
 
     pub(super) fn failure(&self) -> Option<&str> {
@@ -237,10 +275,7 @@ impl VSignalNodesApp {
         self.sample_rate = sample_rate;
         self.execution.plots.clear();
         self.recompile_status();
-        if self.execution.is_running_realtime() {
-            self.stop_realtime();
-            self.toggle_realtime();
-        }
+        self.restart_realtime();
     }
 
     /// Per-frame work: the compile status, a new plan for a running device, and what
@@ -321,33 +356,75 @@ impl VSignalNodesApp {
         }
         if rate != self.sample_rate {
             self.sample_rate = rate;
-            if self.execution.is_running_realtime() {
-                self.stop_realtime();
-                self.toggle_realtime();
-            }
+            self.restart_realtime();
         }
         true
     }
 
-    /// Opens the device and runs the graph on it. The device starts silent and gets
-    /// the plan through the same path later changes take.
+    /// Uses the output device called `name` from now on, the system's default for
+    /// `None`; a real-time run starts over on it.
+    pub(super) fn set_output_device(&mut self, name: Option<String>) {
+        if name != self.execution.output_device {
+            self.execution.output_device = name;
+            self.restart_realtime();
+        }
+    }
+
+    /// Uses the input device called `name` from now on, the system's default for
+    /// `None`; a real-time run starts over with it.
+    pub(super) fn set_input_device(&mut self, name: Option<String>) {
+        if name != self.execution.input_device {
+            self.execution.input_device = name;
+            self.restart_realtime();
+        }
+    }
+
+    /// Starts a real-time run over, if one runs: new devices, new processors.
+    fn restart_realtime(&mut self) {
+        if self.execution.is_running_realtime() {
+            self.stop_realtime();
+            self.toggle_realtime();
+        }
+    }
+
+    /// Opens the devices and runs the graph on them: the output device, and the input
+    /// device if the plan has input nodes. The output starts silent and gets the plan
+    /// through the same path later changes take.
     fn start_realtime(&mut self) -> Result<RealtimeRun, String> {
         let plan = self.compile_graph().map_err(|err| err.to_string())?;
-        let output = Output::default_device().map_err(|err| err.to_string())?;
-        let (mut controller, renderer) =
+        let output = match &self.execution.output_device {
+            Some(name) => Output::named(name),
+            None => Output::default_device(),
+        }
+        .map_err(|err| err.to_string())?;
+        let (mut controller, mut renderer) =
             realtime::channel(self.sample_rate as f32, REALTIME_MAX_FRAMES);
+        let (errors, device_errors) = mpsc::channel();
+        let input = if plan.inputs().is_empty() {
+            None
+        } else {
+            let input = match &self.execution.input_device {
+                Some(name) => Input::named(name),
+                None => Input::default_device(),
+            };
+            let (stream, source) = input
+                .and_then(|input| input.start(self.sample_rate as f32, errors.clone()))
+                .map_err(|err| err.to_string())?;
+            renderer.set_input(Box::new(source));
+            Some(stream)
+        };
         let plugins = &self.plugins;
         let plots = &mut self.execution.plots;
         controller
             .run_plan(plan, |step| make_processor(plugins, plots, step))
             .map_err(|err| err.to_string())?;
-        let (errors, device_errors) = mpsc::channel();
         let stream = output
             .start(renderer, errors)
             .map_err(|err| err.to_string())?;
         self.execution.plan_outdated = false;
         Ok(RealtimeRun {
             _stream: stream,
+            input,
             controller,
             device_errors,
             retry_at: None,
@@ -368,6 +445,8 @@ impl VSignalNodesApp {
 
     /// Sends the graph's plan to the running device if it's newer than what runs
     /// there. A refused send (the device thread is behind) is tried again next frame.
+    /// A plan that gains or loses input nodes starts the run over instead, so the
+    /// input device runs exactly while something takes its signal.
     fn send_outdated_plan(&mut self) {
         let plugins = &self.plugins;
         let execution = &mut self.execution;
@@ -380,6 +459,10 @@ impl VSignalNodesApp {
         };
         let plots = &mut execution.plots;
         let result = match compile(&self.graph) {
+            Ok(plan) if plan.inputs().is_empty() == run.input.is_some() => {
+                self.restart_realtime();
+                return;
+            }
             Ok(plan) => run
                 .controller
                 .run_plan(plan, |step| make_processor(plugins, plots, step)),
@@ -420,15 +503,17 @@ impl VSignalNodesApp {
         }
     }
 
-    /// Starts the one-pass run on a background thread. The processors are created
+    /// Starts the one-pass run on a background thread, recording what the output
+    /// nodes deliver into a WAV file at `record` if given. The processors are created
     /// here, on the thread owning the plugin host, and move over ready to run.
-    pub(super) fn start_one_pass(&mut self) {
+    pub(super) fn start_one_pass(&mut self, record: Option<PathBuf>) {
+        let sample_rate = self.sample_rate;
         match self.build_one_pass_engine() {
             Ok(engine) => {
                 let (result, receiver) = mpsc::channel();
                 thread::spawn(move || {
                     // The receiver is gone only when the editor is closing.
-                    let _ = result.send(run_one_pass(engine));
+                    let _ = result.send(run_one_pass(engine, record, sample_rate));
                 });
                 self.execution.one_pass = Some(receiver);
                 self.execution.one_pass_result = None;
@@ -469,28 +554,55 @@ impl VSignalNodesApp {
         self.execution.one_pass = None;
         match result {
             Ok(summary) => self.execution.one_pass_result = Some(summary),
-            Err(error) => self.execution.failure = Some(error.to_string()),
+            Err(error) => self.execution.failure = Some(error),
         }
     }
 }
 
 /// Runs `engine` once over [`ONE_PASS_FRAMES`], on as many threads as the machine
-/// offers, and measures what the output nodes got.
-fn run_one_pass(mut engine: Engine) -> Result<OnePassSummary, RuntimeError> {
+/// offers, and measures what the output nodes got. With `record`, also writes what
+/// they deliver there as a WAV file at `sample_rate`: mixed like on a device
+/// ([`Engine::mix_outputs`], full scale applied), with as many channels as the widest
+/// output, but not limited to ±1.
+fn run_one_pass(
+    mut engine: Engine,
+    record: Option<PathBuf>,
+    sample_rate: u32,
+) -> Result<OnePassSummary, String> {
     let threads = thread::available_parallelism().map_or(1, usize::from);
     let start = Instant::now();
     let mut peak = 0.0_f32;
-    engine.run_parallel(ONE_PASS_FRAMES, threads, |engine, frames| {
-        for output in engine.plan().outputs() {
-            for sample in engine.delivered(output, frames) {
-                peak = peak.max(sample.abs());
+    let channels = engine.output_channels();
+    let mut recorded = Vec::with_capacity(if record.is_some() {
+        ONE_PASS_FRAMES * channels
+    } else {
+        0
+    });
+    engine
+        .run_parallel(ONE_PASS_FRAMES, threads, |engine, frames| {
+            for output in engine.plan().outputs() {
+                for sample in engine.delivered(output, frames) {
+                    peak = peak.max(sample.abs());
+                }
             }
-        }
-    })?;
+            if record.is_some() {
+                let at = recorded.len();
+                recorded.resize(at + frames * channels, 0.0);
+                engine.mix_outputs(&mut recorded[at..], channels, frames);
+            }
+        })
+        .map_err(|err| err.to_string())?;
+    let elapsed = start.elapsed();
+    if let Some(path) = &record {
+        let channels = u16::try_from(channels).map_err(|err| err.to_string())?;
+        crate::wav::write_wav(path, &recorded, channels, sample_rate)
+            .map_err(|err| format!("{}: {err}", path.display()))?;
+    }
     Ok(OnePassSummary {
         frames: ONE_PASS_FRAMES,
-        elapsed: start.elapsed(),
+        elapsed,
         peak,
+        written: record,
     })
 }
 
@@ -500,7 +612,7 @@ mod tests {
     use crate::editor::commands::Command;
     use v_signal_nodes_core::{InputRef, OutputRef};
     use v_signal_nodes_plugin_std::{
-        AMPLIFIER, DEVICE_OUTPUT, DUAL_BEAM_OSCILLOSCOPE, GENERATOR, OSCILLOSCOPE,
+        AMPLIFIER, DEVICE_INPUT, DEVICE_OUTPUT, DUAL_BEAM_OSCILLOSCOPE, GENERATOR, OSCILLOSCOPE,
     };
 
     /// An app with source → gain → sink.
@@ -659,6 +771,45 @@ mod tests {
             assert_eq!(app.execution.failure(), None, "{rate}");
             assert!(app.execution.is_running_realtime(), "{rate}");
         }
+    }
+
+    /// The input device runs exactly while the plan has an input node: adding one
+    /// starts the run over with it, removing it starts the run over without. Silent:
+    /// the input goes to an oscilloscope, not the output. Ignored like the test above,
+    /// and also needs an input device (and on macOS the microphone permission).
+    #[test]
+    #[ignore = "needs an output and an input device"]
+    fn the_input_device_runs_while_an_input_node_does() {
+        let mut app = VSignalNodesApp::default();
+        let ctx = egui::Context::default();
+        let settle = |app: &mut VSignalNodesApp| {
+            for _ in 0..5 {
+                app.update_execution(&ctx);
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
+        app.add_node_at(app.kind_of(DEVICE_OUTPUT).unwrap(), egui::Pos2::ZERO)
+            .unwrap();
+        app.refresh_compile_status();
+        app.execute(Command::RunRealtime);
+        settle(&mut app);
+        assert!(!app.execution.is_taking_input());
+
+        let input = app
+            .add_node_at(app.kind_of(DEVICE_INPUT).unwrap(), egui::pos2(0.0, 300.0))
+            .unwrap();
+        let scope = app
+            .add_node_at(app.kind_of(OSCILLOSCOPE).unwrap(), egui::pos2(300.0, 300.0))
+            .unwrap();
+        assert!(app.connect(OutputRef::new(input, 0), InputRef::new(scope, 0)));
+        settle(&mut app);
+        assert_eq!(app.execution.failure(), None);
+        assert!(app.execution.is_taking_input());
+
+        app.remove_node(input);
+        settle(&mut app);
+        assert!(app.execution.is_running_realtime());
+        assert!(!app.execution.is_taking_input());
     }
 
     /// A changed parameter goes straight to the running device: no recompiling, no new
@@ -865,8 +1016,14 @@ mod tests {
 
     /// Runs `app` once to the end and returns what came of it.
     fn run_once(app: &mut VSignalNodesApp) -> OnePassSummary {
+        run_once_to(app, None)
+    }
+
+    /// [`run_once`], recording to `record` if given.
+    fn run_once_to(app: &mut VSignalNodesApp, record: Option<PathBuf>) -> OnePassSummary {
         let ctx = egui::Context::default();
-        app.execute(Command::RunAsync);
+        app.refresh_compile_status();
+        app.start_one_pass(record);
         let deadline = Instant::now() + Duration::from_secs(60);
         while app.execution.is_running_one_pass() {
             assert!(Instant::now() < deadline, "the run doesn't finish");
@@ -874,7 +1031,53 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(app.execution.failure(), None);
-        app.execution.one_pass_result().unwrap()
+        app.execution.one_pass_result().unwrap().clone()
+    }
+
+    #[test]
+    fn a_run_to_a_file_writes_what_the_device_would_get() {
+        let mut app = runnable();
+        let sink = app
+            .nodes()
+            .find(|node| node.node.type_id() == DEVICE_OUTPUT)
+            .unwrap()
+            .id;
+        // 2 V full scale: the 1 V sine reaches half of it.
+        let full_scale = app
+            .graph
+            .node(sink)
+            .unwrap()
+            .spec()
+            .param_index("full_scale");
+        assert!(app.set_param(sink, full_scale.unwrap(), ParamValue::Number(2.0)));
+        let dir = std::env::temp_dir().join(format!("v-signal-nodes-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.wav");
+
+        let summary = run_once_to(&mut app, Some(path.clone()));
+
+        assert_eq!(summary.written.as_ref(), Some(&path));
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(crate::wav::channels_of(&bytes), 1, "one mono output");
+        let samples = crate::wav::samples_of(&bytes);
+        assert_eq!(samples.len(), ONE_PASS_FRAMES);
+        let peak = samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        assert!((peak - 0.5).abs() < 0.01, "{peak}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn input_nodes_are_silent_in_a_run_once() {
+        let mut app = VSignalNodesApp::default();
+        let input = app
+            .add_node_at(app.kind_of(DEVICE_INPUT).unwrap(), egui::pos2(0.0, 0.0))
+            .unwrap();
+        let sink = app
+            .add_node_at(app.kind_of(DEVICE_OUTPUT).unwrap(), egui::pos2(300.0, 0.0))
+            .unwrap();
+        assert!(app.connect(OutputRef::new(input, 0), InputRef::new(sink, 0)));
+
+        assert_eq!(run_once(&mut app).peak, 0.0);
     }
 
     #[test]

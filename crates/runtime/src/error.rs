@@ -8,8 +8,9 @@ use v_signal_nodes_plugin_api::PluginError;
 /// Why an [`Engine`](crate::Engine) couldn't be built or a block couldn't be
 /// processed.
 ///
-/// TODO(P1-1): `PluginError` carries a `String`, so a failing plugin allocates on
-/// the real-time thread; replace with an error code + a message fetched later.
+/// The errors of a block ([`Plugin`](Self::Plugin), [`Panicked`](Self::Panicked),
+/// [`TooManyFrames`](Self::TooManyFrames)) are made on the real-time thread and
+/// allocate nothing: a [`PluginError`] keeps its message in itself.
 #[derive(Debug)]
 pub enum RuntimeError {
     /// The plan has a step for a node no processor was given for.

@@ -10,7 +10,9 @@
 //! an output node or an instrument); the rest produce nothing anyone reads. A graph
 //! without such nodes doesn't compile ([`CompileError::NoOutput`]). [`Plan::outputs`]
 //! lists what the output nodes read, for whoever delivers it (a device driver, a
-//! file); instruments take what they need themselves and aren't in it.
+//! file); instruments take what they need themselves and aren't in it. The other way,
+//! [`Plan::inputs`] lists the outputs of input nodes ([`NodeKind::Input`]) that run,
+//! which the executor fills with what comes from outside before the node runs.
 //!
 //! Buffers: a socket's channels one after another
 //! ([`BufferShape::buffer_len`]). Unconnected inputs read [`Input::Silence`]: the
@@ -117,9 +119,22 @@ pub struct Step {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanOutput {
     pub node: NodeId,
+    /// The index of the node's step.
+    pub step: usize,
     /// The input socket's index.
     pub input: usize,
     pub source: Input,
+    pub shape: BufferShape,
+}
+
+/// One output of an input node ([`NodeKind::Input`]): a signal the host feeds in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanInput {
+    pub node: NodeId,
+    /// The index of the node's step.
+    pub step: usize,
+    /// The output socket's index.
+    pub output: usize,
     pub shape: BufferShape,
 }
 
@@ -132,6 +147,7 @@ pub struct Plan {
     /// The buffers still valid after a block: of the outputs feeding output nodes.
     by_output: HashMap<OutputRef, BufferId>,
     outputs: Vec<PlanOutput>,
+    inputs: Vec<PlanInput>,
 }
 
 impl Plan {
@@ -160,6 +176,12 @@ impl Plan {
     /// Every input of every output node, in step and then socket order.
     pub fn outputs(&self) -> &[PlanOutput] {
         &self.outputs
+    }
+
+    /// Every output of every input node that runs, in step and then socket order:
+    /// what the host feeds in before each block.
+    pub fn inputs(&self) -> &[PlanInput] {
+        &self.inputs
     }
 }
 
@@ -309,19 +331,37 @@ pub fn compile(graph: &Graph) -> Result<Plan, CompileError> {
         .into_iter()
         .map(|(from, source)| (from, physical[source]))
         .collect();
-    let outputs = steps
+    let outputs =
+        steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| step.spec.kind == NodeKind::Output)
+            .flat_map(|(index, step)| {
+                let sockets = step.spec.sockets(SocketDirection::Input);
+                step.inputs.iter().zip(sockets).enumerate().map(
+                    move |(input, (&source, socket))| PlanOutput {
+                        node: step.node,
+                        step: index,
+                        input,
+                        source,
+                        shape: BufferShape::of(socket),
+                    },
+                )
+            })
+            .collect();
+    let inputs = steps
         .iter()
-        .filter(|step| step.spec.kind == NodeKind::Output)
-        .flat_map(|step| {
-            let sockets = step.spec.sockets(SocketDirection::Input);
-            step.inputs
+        .enumerate()
+        .filter(|(_, step)| step.spec.kind == NodeKind::Input)
+        .flat_map(|(index, step)| {
+            let sockets = step.spec.sockets(SocketDirection::Output);
+            sockets
                 .iter()
-                .zip(sockets)
                 .enumerate()
-                .map(|(input, (&source, socket))| PlanOutput {
+                .map(move |(output, socket)| PlanInput {
                     node: step.node,
-                    input,
-                    source,
+                    step: index,
+                    output,
                     shape: BufferShape::of(socket),
                 })
         })
@@ -331,6 +371,7 @@ pub fn compile(graph: &Graph) -> Result<Plan, CompileError> {
         buffers,
         by_output,
         outputs,
+        inputs,
     })
 }
 
@@ -514,6 +555,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn input_nodes_that_run_are_listed_for_the_host() {
+        let mut graph = Graph::new();
+        let input = |graph: &mut Graph| {
+            let stereo = mono_out().with_channels(2);
+            graph.add(Node::new(spec(NodeKind::Input, &[], &[stereo])))
+        };
+        let used = input(&mut graph);
+        let unused = input(&mut graph);
+        let gain = thru(&mut graph);
+        let out = sink(&mut graph, mono_in());
+        connect(&mut graph, used, gain);
+        connect(&mut graph, gain, out);
+
+        let plan = compile(&graph).unwrap();
+
+        let step = plan.steps().iter().position(|s| s.node == used).unwrap();
+        assert_eq!(
+            plan.inputs(),
+            [PlanInput {
+                node: used,
+                step,
+                output: 0,
+                shape: BufferShape {
+                    rate: SignalRate::Sample,
+                    channels: 2
+                },
+            }]
+        );
+        assert!(
+            plan.steps().iter().all(|s| s.node != unused),
+            "it runs for nothing"
+        );
     }
 
     #[test]

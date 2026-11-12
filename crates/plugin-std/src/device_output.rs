@@ -1,13 +1,14 @@
 //! [`DEVICE_OUTPUT`]: the output to the device.
 //!
-//! The host reads this node's input and sends it to the output device, where 1 V is
-//! the device's full scale; higher voltages clip there.
+//! The host reads this node's input and sends it to the output device, where the
+//! voltage of the full-scale parameter (1 V by default) is the device's full scale;
+//! higher voltages clip there.
 
 use v_signal_nodes_plugin_api::{
     NodeKind, NodeProcessor, NodeProvider, NodeSocket, NodeSpec, PluginError, ProcessIo, TextKey,
 };
 
-use crate::DEVICE_OUTPUT;
+use crate::{DEVICE_OUTPUT, full_scale_spec, full_scale_translation};
 
 pub(crate) struct DeviceOutput;
 
@@ -15,11 +16,13 @@ impl NodeProvider for DeviceOutput {
     fn spec(&self) -> NodeSpec {
         NodeSpec::new(DEVICE_OUTPUT, "Device output", NodeKind::Output)
             .input(NodeSocket::signal_in("In"))
+            .param(full_scale_spec())
             .translate(
                 "ru",
                 [
                     (TextKey::Name, "Выход устройства"),
                     (TextKey::Input(0), "Вход"),
+                    full_scale_translation(),
                 ],
             )
     }
@@ -29,7 +32,7 @@ impl NodeProvider for DeviceOutput {
     }
 }
 
-/// Does nothing: the sink has no outputs to fill.
+/// Does nothing: the sink has no outputs to fill, and the host applies the full scale.
 struct DeviceOutputProcessor;
 
 impl NodeProcessor for DeviceOutputProcessor {

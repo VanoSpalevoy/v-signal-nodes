@@ -1,6 +1,9 @@
 //! The real-time rule itself: no allocation or freeing on the real-time thread, also
-//! while a new plan and parameter messages arrive. Has its own binary because it
-//! replaces the global allocator.
+//! while a new plan and parameter messages arrive, and when a node fails (linked or
+//! through the C ABI). Has its own binary because it replaces the global allocator.
+//!
+//! A panicking node isn't covered: Rust's panics allocate their payload, and the
+//! default panic hook prints to stderr, before anything here can catch them.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -10,13 +13,27 @@ use v_signal_nodes_core::{
     compile,
 };
 use v_signal_nodes_plugin_api::{
-    NodeProcessor, NodeProvider, Plugin, PluginError, ProcessIo, Registrar,
+    NodeProcessor, NodeProvider, Plugin, PluginError, ProcessIo, Registrar, ffi,
 };
-use v_signal_nodes_plugin_host::PluginHost;
+use v_signal_nodes_plugin_host::{DynamicPlugin, PluginHost};
 use v_signal_nodes_plugin_std::{
-    AMPLIFIER, DEVICE_OUTPUT, GENERATOR, OSCILLOSCOPE, SUMMING_AMPLIFIER, StdPlugin,
+    AMPLIFIER, DEVICE_INPUT, DEVICE_OUTPUT, GENERATOR, OSCILLOSCOPE, SUMMING_AMPLIFIER, StdPlugin,
 };
+use v_signal_nodes_runtime::realtime::InputSource;
 use v_signal_nodes_runtime::{plots, realtime};
+
+/// A device input giving a constant on two channels.
+struct Constant;
+
+impl InputSource for Constant {
+    fn channels(&self) -> usize {
+        2
+    }
+
+    fn read(&mut self, samples: &mut [f32]) {
+        samples.fill(0.25);
+    }
+}
 
 /// Counts the calls made while [`COUNTING`] is on, on this thread only.
 struct Counting;
@@ -140,6 +157,9 @@ fn the_real_time_thread_doesnt_allocate() {
     connect(&mut graph, source, gain, 0);
     connect(&mut graph, gain, mixer, 0);
     connect(&mut graph, source, mixer, 1);
+    // Fed from the device input before every block.
+    let input = add(&mut graph, &host, DEVICE_INPUT);
+    connect(&mut graph, input, mixer, 2);
     connect(&mut graph, mixer, sink, 0);
     // Mono into a stereo input: goes through a conversion.
     connect(&mut graph, source, direct, 0);
@@ -153,6 +173,7 @@ fn the_real_time_thread_doesnt_allocate() {
         .unwrap();
 
     let (mut controller, mut renderer) = realtime::channel(48_000.0, 64);
+    renderer.set_input(Box::new(Constant));
     let make = |step: &Step| make_processor(&host, step);
     let mut device = vec![0.0; 2048];
 
@@ -180,4 +201,101 @@ fn the_real_time_thread_doesnt_allocate() {
     controller.clear().unwrap();
     let clearing = allocator_calls(|| renderer.render(&mut device, 2));
     assert_eq!(clearing, 0, "clearing");
+}
+
+/// Type id of [`Failing`].
+const FAILING: &str = "test.failing";
+
+/// An output node whose processor fails in its second block, with a message made
+/// there.
+struct Failing;
+
+impl NodeProvider for Failing {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec::new(FAILING, "Failing", NodeKind::Output).input(NodeSocket::signal_in("in"))
+    }
+
+    fn create_processor(&self) -> Box<dyn NodeProcessor> {
+        Box::new(FailingProcessor { blocks: 0 })
+    }
+}
+
+struct FailingProcessor {
+    blocks: usize,
+}
+
+impl NodeProcessor for FailingProcessor {
+    fn process(&mut self, _io: &mut ProcessIo<'_>) -> Result<(), PluginError> {
+        self.blocks += 1;
+        if self.blocks == 2 {
+            return Err(PluginError::new(format_args!(
+                "failed in block {}",
+                self.blocks
+            )));
+        }
+        Ok(())
+    }
+}
+
+struct FailingPlugin;
+
+impl Plugin for FailingPlugin {
+    fn name(&self) -> &str {
+        "failing"
+    }
+
+    fn version(&self) -> &str {
+        "0.1.0"
+    }
+
+    fn register(&self, registrar: &mut dyn Registrar) {
+        registrar.register_node(Box::new(Failing));
+    }
+}
+
+/// Runs [`Failing`] from `host` until it fails, counting the allocations of the
+/// rendering it fails in, and returns them with the error that came back.
+fn render_a_failure(host: &PluginHost) -> (usize, String) {
+    let mut graph = Graph::new();
+    add(&mut graph, host, FAILING);
+    let (mut controller, mut renderer) = realtime::channel(48_000.0, 64);
+    let mut device = vec![0.0; 2048];
+
+    controller
+        .run_plan(compile(&graph).unwrap(), |step: &Step| {
+            make_processor(host, step)
+        })
+        .unwrap();
+    // Applying the plan and 16 blocks of 64 frames, the second of which fails.
+    let calls = allocator_calls(|| renderer.render(&mut device, 2));
+    let error = controller.poll().expect("the node failed").to_string();
+    (calls, error)
+}
+
+#[test]
+fn a_failing_node_doesnt_allocate() {
+    let mut host = PluginHost::new();
+    host.load(&FailingPlugin).unwrap();
+
+    let (calls, error) = render_a_failure(&host);
+
+    assert_eq!(calls, 0, "failing");
+    assert!(error.ends_with("failed in block 2"), "{error}");
+}
+
+#[test]
+fn a_node_failing_through_the_c_abi_doesnt_allocate() {
+    // SAFETY: `export` produces a plugin object following the `ffi` protocol, and its
+    // code is part of this binary.
+    let plugin = unsafe { DynamicPlugin::from_ffi(ffi::export(|| FailingPlugin), None) }.unwrap();
+    let mut host = PluginHost::new();
+    host.load(&plugin).unwrap();
+
+    let (calls, error) = render_a_failure(&host);
+
+    assert_eq!(
+        calls, 0,
+        "failing on the plugin side and reading the status"
+    );
+    assert!(error.ends_with("failed in block 2"), "{error}");
 }

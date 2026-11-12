@@ -6,6 +6,7 @@
 
 mod document;
 mod editor;
+mod wav;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

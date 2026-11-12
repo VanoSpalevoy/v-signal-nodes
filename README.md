@@ -29,9 +29,9 @@ bits are planned.
 
 > [!NOTE]
 > **Status: early development.** You can build graphs in the editor and run them:
-> in real time on the default output device, or once on background threads, which
-> for now only reports the result in the debug panel. You can edit parameters while
-> it runs, but you can't save graphs yet. The plugin API is still changing, and
+> in real time on a sound device (output and input), or once on background threads,
+> recording the output to a WAV file if you like. You can edit parameters while it
+> runs, but you can't save graphs yet. The plugin API is still changing, and
 > plugins built for one API version are refused by hosts built for another.
 
 ## Contents
@@ -64,6 +64,13 @@ bits are planned.
   its half filtered out. The rate is saved with the graph. A node frequency above a
   quarter of the sample rate gets a warning in the bottom panel, with the rate it
   needs.
+- **Devices in and out.** The system's default sound devices or any chosen in the
+  toolbar. An input node takes a channel of the input device, resampled to the
+  project's rate; the input device runs only while the graph has an input node.
+  Device nodes say which voltage is the device's full scale.
+- **Runs to a file.** A run once can write what the output nodes deliver to a
+  32-bit float WAV file, chosen in the system's save dialog: full scale applied,
+  nothing clipped.
 - **Plugins.** Rust crates linked into the editor, or dynamic libraries loaded
   through a C ABI, with an API version check and panics caught at the boundary.
 - **Two languages.** An English or Russian interface. Plugins translate their
@@ -79,7 +86,8 @@ bits are planned.
   offset; generators of one frequency keep their set phases, so 0° and 180° add up
   to zero), `std.amplifier` (inverting if negative, with optional clipping at its
   supply), `std.summing_amplifier` (sums its inputs sample by sample),
-  `std.device_output` (1 V is the device's full scale), `std.oscilloscope` (a
+  `std.device_input` (a channel of the input device, in volts at the set full scale),
+  `std.device_output` (its full scale, 1 V by default, is the device's), `std.oscilloscope` (a
   triggered sweep on a screen in its window, optionally interpolated by sin(x)/x like
   on a digital oscilloscope; it needs no output node and nothing it looks at is
   heard) and `std.dual_beam_oscilloscope` (the same with two inputs on one screen, in
@@ -117,7 +125,8 @@ sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev lib
 | Change a choice or a toggle  | Click it on the node                                   |
 | Advanced parameters          | The `⋯` button in the header opens them in a window    |
 | Clear the selection          | Click empty canvas or press `Esc`                      |
-| Zoom, snap to grid, sample rate, language | Toolbar                                   |
+| Zoom, snap to grid, sample rate, devices, language | Toolbar                          |
+| Run in real time / once / once to a file | `Space` / `Cmd`/`Ctrl`+`Enter` / `Cmd`/`Ctrl`+`Shift`+`Enter`, or the Run menu |
 
 Each input takes one connection. Connecting an input that is already connected
 replaces its old connection. The bottom panel lists the connections and shows
@@ -129,7 +138,7 @@ why a connection was refused.
 flowchart LR
     app["app<br/>egui editor"] --> host["plugin-host<br/>plugin loading"]
     app --> core["core<br/>node model"]
-    app --> device["device<br/>output driver"]
+    app --> device["device<br/>sound devices"]
     device --> runtime["runtime<br/>runs compiled plans"]
     runtime --> api
     host --> api["plugin-api<br/>contract + C ABI"]
@@ -147,7 +156,7 @@ flowchart LR
 | `crates/plugin-host`  | Loads plugins (linked or from a dynamic library), builds nodes and their processors |
 | `crates/plugin-std`   | The standard nodes (`std.*`), the reference plugin            |
 | `crates/runtime`      | Graph processing: runs a compiled plan, on a real-time thread or in one parallel pass |
-| `crates/device`       | The first device driver: the default output, through `cpal`    |
+| `crates/device`       | The first device driver: sound outputs and inputs, through `cpal` |
 
 API docs: `cargo doc --workspace --no-deps --open`.
 
@@ -225,10 +234,14 @@ export_plugin!(MyPlugin);
 
 - **Type ids** are namespaced by the plugin, for example `my.invert`, and must
   be unique across all loaded plugins.
-- **Roles and sockets must match:** a `Generator` needs an output (it may also
-  take modulation inputs), a `Processor` needs inputs and outputs, and an
-  `Output` needs an input. The role picks the palette group and the default
-  color; `NodeSpec::color` sets a color of its own.
+- **Roles and sockets must match:** an `Input` needs outputs and no inputs (the
+  host fills them from the input device), a `Generator` needs an output (it may
+  also take modulation inputs), a `Processor` needs inputs and outputs, and an
+  `Output` or `Instrument` needs an input. The role picks the palette group and the
+  default color; `NodeSpec::color` sets a color of its own. On `Input` and `Output`
+  nodes the host reads two parameters itself, if there: `FULL_SCALE` (the voltage of
+  the device's full scale) and, on inputs, `DEVICE_CHANNEL` (the device channel the
+  first channel takes).
 - **Sockets** carry a rate (`SignalRate::Sample`: a value per sample, the
   signal itself; `SignalRate::Control`: one value per block) and a channel count
   (`with_channels`, one channel by default). `NodeSocket::signal_in` /
@@ -255,6 +268,9 @@ export_plugin!(MyPlugin);
   and again when either value changes. That's the place to allocate memory,
   because `process` runs on the real-time thread.
 - `process` gets at most `max_frames` frames per call. Outputs start zeroed.
+- A `PluginError` keeps its message inside itself (up to `MAX_ERROR_LEN` bytes), so
+  failing in `process` doesn't allocate. Build the message with `format_args!`,
+  not `format!`: `PluginError::new(format_args!("no option {index}"))`.
 - `reset` clears the signal history (phase, filter state) when processing
   restarts or jumps.
 - Panics in dynamic-library plugins are caught at the C ABI boundary. This
@@ -299,13 +315,14 @@ already load a dynamic library, but the editor doesn't call it yet.
 - [x] CI on Linux, macOS and Windows
 - [x] Graph in `core` with connection checks and generational node ids
 - [x] Graph runtime: real-time processing and an offline pass
-- [x] Output to the system's default device
-- [x] Project sample rate apart from the device's, with resampled output
+- [x] Sound devices in and out, chosen in the toolbar, with a full scale in volts
+- [x] Project sample rate apart from the device's, resampled both ways
+- [x] Running once to a WAV file
 - [x] Node windows drawn by the editor: plots, single- and dual-beam oscilloscopes
 - [x] Parameter units, warning about too few samples per period
 - [ ] Sample formats beyond real numbers: complex (IQ) and digital (bits)
 - [ ] Different sample rates in one graph (decimation, interpolation)
-- [ ] Device and file I/O: SDRs, ADCs/DACs, sound cards, signal files (SigMF)
+- [ ] More devices and files: SDRs, other ADCs/DACs, reading signal files (WAV, SigMF)
 - [ ] Bridges to other plugins and devices: SoapySDR, FMI 3.0 models (FMU), CLAP
 - [x] Editing node parameters
 - [ ] Saving and loading graphs, undo and redo
@@ -331,5 +348,7 @@ must be documented.
 
 BSD 3-Clause; see [LICENSE](LICENSE).
 
-On Linux the output driver links ALSA's `libasound` (LGPL-2.1) dynamically; it is a
-system library and not part of this program.
+On Linux the device driver links ALSA's `libasound` (LGPL-2.1) dynamically, and the
+file dialog loads the system's `libdbus` (AFL-2.1 or GPL-2.0, used under AFL-2.1)
+at run time to reach the desktop portal; both are system libraries and not part of
+this program.

@@ -1,15 +1,16 @@
-//! The real-time rule for resampling: once made, a [`Resampled`] neither allocates nor
-//! frees on the device's thread. Has its own binary because it replaces the global
-//! allocator.
+//! The real-time rule for the device side: once made, a [`Resampled`] output and a
+//! [`DeviceInput`] neither allocate nor free on the device's thread. Has its own
+//! binary because it replaces the global allocator.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use v_signal_nodes_core::{Graph, InputRef, OutputRef, compile};
-use v_signal_nodes_device::Resampled;
+use v_signal_nodes_device::{DeviceInput, Resampled};
 use v_signal_nodes_plugin_host::PluginHost;
 use v_signal_nodes_plugin_std::{DEVICE_OUTPUT, GENERATOR, StdPlugin};
 use v_signal_nodes_runtime::realtime;
+use v_signal_nodes_runtime::realtime::InputSource;
 
 /// Counts the calls made while [`COUNTING`] is on, on this thread only.
 struct Counting;
@@ -90,5 +91,25 @@ fn resampling_doesnt_allocate() {
 
         assert_eq!(calls, 0, "{rate} Hz to {device_rate} Hz");
         assert!(device.iter().any(|&sample| sample != 0.0));
+    }
+}
+
+#[test]
+fn taking_device_input_doesnt_allocate() {
+    // Same rate, and resampled up.
+    for device_rate in [48_000.0, 44_100.0] {
+        let (mut device, ring) = rtrb::RingBuffer::new(48_000);
+        let mut input = DeviceInput::new(ring, 2, device_rate, 48_000.0).unwrap();
+        let mut samples = vec![0.0; 2 * 1000];
+        let calls = allocator_calls(|| {
+            for _ in 0..10 {
+                // Some of it there, some missing.
+                for _ in 0..1500 {
+                    let _ = device.push(0.5);
+                }
+                input.read(&mut samples);
+            }
+        });
+        assert_eq!(calls, 0, "from {device_rate} Hz");
     }
 }

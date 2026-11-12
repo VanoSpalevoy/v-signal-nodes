@@ -87,7 +87,7 @@ struct GeneratorProcessor {
 impl NodeProcessor for GeneratorProcessor {
     fn prepare(&mut self, sample_rate: f32, _max_frames: usize) -> Result<(), PluginError> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
-            return Err(PluginError::new(format!(
+            return Err(PluginError::new(format_args!(
                 "invalid sample rate {sample_rate}"
             )));
         }

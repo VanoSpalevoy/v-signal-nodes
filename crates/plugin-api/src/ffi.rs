@@ -312,7 +312,8 @@ impl FfiStatus {
         }
     }
 
-    /// Copies the result out.
+    /// Copies the result out, without allocating: a failed `process` is read on the
+    /// real-time thread.
     ///
     /// # Safety
     ///
@@ -322,7 +323,11 @@ impl FfiStatus {
             return Ok(());
         }
         // SAFETY: forwarded to the caller.
-        Err(PluginError::new(unsafe { self.message.read() }?))
+        let bytes = unsafe { self.message.as_slice() };
+        Err(match std::str::from_utf8(bytes) {
+            Ok(message) => PluginError::new(message),
+            Err(_) => PluginError::new("error message is not valid UTF-8"),
+        })
     }
 }
 
@@ -351,6 +356,7 @@ fn node_kind_code(kind: NodeKind) -> u8 {
         NodeKind::Processor => 1,
         NodeKind::Output => 2,
         NodeKind::Instrument => 3,
+        NodeKind::Input => 4,
     }
 }
 
@@ -360,6 +366,7 @@ fn node_kind_from(code: u8) -> Result<NodeKind, PluginError> {
         1 => NodeKind::Processor,
         2 => NodeKind::Output,
         3 => NodeKind::Instrument,
+        4 => NodeKind::Input,
         _ => return Err(bad_code("node kind", code)),
     })
 }
@@ -461,7 +468,7 @@ unsafe fn text_key_from(key: &FfiTextKey) -> Result<TextKey, PluginError> {
 }
 
 fn bad_code(what: &str, code: u8) -> PluginError {
-    PluginError::new(format!("unknown {what} code {code}"))
+    PluginError::new(format_args!("unknown {what} code {code}"))
 }
 
 // --- Host side --------------------------------------------------------------
@@ -774,7 +781,7 @@ unsafe extern "C" fn plugin_create_processor(ctx: *const c_void, index: usize) -
             processor: node.provider.create_processor(),
             spec: Arc::clone(&node.spec),
             params: Vec::with_capacity(node.spec.params.len()),
-            error: String::new(),
+            error: PluginError::new(""),
         }
     }));
     let ctx = match processor {
@@ -805,23 +812,25 @@ struct ExportedProcessor {
     /// [`FfiParamValue`]s; sized for the spec's parameters up front, so `process`
     /// doesn't allocate.
     params: Vec<ParamValue>,
-    /// Message of the last failed call, borrowed by the returned status.
-    error: String,
+    /// The error of the last failed call, whose message the returned status borrows.
+    /// Kept as is, so failing allocates nothing.
+    error: PluginError,
 }
 
 impl ExportedProcessor {
-    /// The status for `result` of a call to `what` (`result` is `Err` if it panicked).
+    /// The status for `result` of a call; `panicked` is the message if it panicked
+    /// (`result` is `Err`).
     fn status(
         &mut self,
-        what: &str,
+        panicked: &'static str,
         result: std::thread::Result<Result<(), PluginError>>,
     ) -> FfiStatus {
         self.error = match result {
             Ok(Ok(())) => return FfiStatus::ok(),
-            Ok(Err(err)) => err.message().to_owned(),
-            Err(_) => format!("node panicked in {what}"),
+            Ok(Err(err)) => err,
+            Err(_) => PluginError::new(panicked),
         };
-        FfiStatus::failed(&self.error)
+        FfiStatus::failed(self.error.message())
     }
 }
 
@@ -843,7 +852,7 @@ unsafe extern "C" fn processor_prepare(
     let result = catch_unwind(AssertUnwindSafe(|| {
         state.processor.prepare(sample_rate, max_frames)
     }));
-    state.status("prepare", result)
+    state.status("node panicked in prepare", result)
 }
 
 unsafe extern "C" fn processor_reset(ctx: *mut c_void) {
@@ -877,7 +886,7 @@ unsafe extern "C" fn processor_process(ctx: *mut c_void, args: FfiProcessArgs) -
         };
         state.processor.process(&mut io)
     }));
-    state.status("process", result)
+    state.status("node panicked in process", result)
 }
 
 unsafe extern "C" fn processor_drop(ctx: *mut c_void) {

@@ -6,14 +6,17 @@
 //!
 //! | Type id                 | Module                | Kind       | Inputs     | Outputs | Parameters                                 |
 //! |-------------------------|-----------------------|------------|------------|---------|--------------------------------------------|
+//! | `std.device_input`      | [`device_input`]      | Input      | —          | Out     | Channel, Full scale                        |
 //! | `std.generator`         | [`generator`]         | Generator  | —          | Out     | Waveform, Frequency, Amplitude, Phase, *Offset* |
 //! | `std.amplifier`         | [`amplifier`]         | Processor  | In         | Out     | Gain, *Clipping, Supply*                   |
 //! | `std.summing_amplifier` | [`summing_amplifier`] | Processor  | In 1, 2, 3 | Out     | Gain, *Weight 1, 2, 3*, *Clipping, Supply* |
-//! | `std.device_output`     | [`device_output`]     | Output     | In         | —       | —                                          |
+//! | `std.device_output`     | [`device_output`]     | Output     | In         | —       | Full scale                                 |
 //! | `std.oscilloscope`      | [`oscilloscope`]      | Instrument | In         | —       | Sweep, *Trigger*, *Level*, *Interpolation* |
 //! | `std.dual_beam_oscilloscope` | [`dual_beam_oscilloscope`] | Instrument | In 1, 2 | — | Sweep, *Trigger*, *Trigger source*, *Level*, *Interpolation* |
 //!
-//! Parameters in italics are advanced (`ParamSpec::advanced`). The oscilloscopes also
+//! The device nodes' channel and full scale are read by the host itself
+//! (`FULL_SCALE`, `DEVICE_CHANNEL` of the plugin API), so their processors do
+//! nothing. Parameters in italics are advanced (`ParamSpec::advanced`). The oscilloscopes also
 //! have a window with their screen. Every label is English in the spec, with Russian
 //! translations next to it (`NodeSpec::translate`), so the editor needs no strings of
 //! its own for these nodes. Parameters are declared once as key constants, used both
@@ -24,6 +27,7 @@
 //! allocations in `process`).
 
 pub mod amplifier;
+pub mod device_input;
 pub mod device_output;
 pub mod dual_beam_oscilloscope;
 pub mod generator;
@@ -31,8 +35,8 @@ pub mod oscilloscope;
 pub mod summing_amplifier;
 
 use v_signal_nodes_plugin_api::{
-    NumberParam, ParamKey, ParamSpec, Plugin, PluginError, ProcessIo, Registrar, TextKey,
-    ToggleParam, Unit,
+    DEFAULT_FULL_SCALE, FULL_SCALE, NumberParam, ParamKey, ParamSpec, Plugin, PluginError,
+    ProcessIo, Registrar, TextKey, ToggleParam, Unit,
 };
 
 /// Type id of the voltage generator.
@@ -47,6 +51,21 @@ pub const OSCILLOSCOPE: &str = "std.oscilloscope";
 pub const DUAL_BEAM_OSCILLOSCOPE: &str = "std.dual_beam_oscilloscope";
 /// Type id of the output to the device.
 pub const DEVICE_OUTPUT: &str = "std.device_output";
+/// Type id of the input from the device.
+pub const DEVICE_INPUT: &str = "std.device_input";
+
+/// The spec of [`FULL_SCALE`] for the device nodes: the voltage at the device's full
+/// scale.
+fn full_scale_spec() -> ParamSpec {
+    FULL_SCALE
+        .spec("Full scale, V", 0.001, 1000.0, DEFAULT_FULL_SCALE)
+        .unit(Unit::Volts)
+}
+
+/// The translation of [`FULL_SCALE`].
+fn full_scale_translation() -> (TextKey, &'static str) {
+    (FULL_SCALE.name_key(), "Полная шкала, В")
+}
 
 /// Whether an amplifier stage clips at its [`SUPPLY`], like a real one. Off by default:
 /// an ideal stage does what its gain says, however high the voltage.
@@ -100,6 +119,7 @@ impl Plugin for StdPlugin {
         registrar.register_node(Box::new(amplifier::Amplifier));
         registrar.register_node(Box::new(summing_amplifier::SummingAmplifier));
         registrar.register_node(Box::new(device_output::DeviceOutput));
+        registrar.register_node(Box::new(device_input::DeviceInput));
         registrar.register_node(Box::new(oscilloscope::Oscilloscope));
         registrar.register_node(Box::new(dual_beam_oscilloscope::DualBeamOscilloscope));
     }
@@ -133,7 +153,9 @@ mod tests {
             AMPLIFIER,
             SUMMING_AMPLIFIER,
             DEVICE_OUTPUT,
+            DEVICE_INPUT,
             OSCILLOSCOPE,
+            DUAL_BEAM_OSCILLOSCOPE,
         ] {
             assert!(
                 specs.iter().any(|spec| spec.type_id == type_id),
@@ -146,7 +168,12 @@ mod tests {
     fn specs_are_valid_and_fully_translated() {
         for spec in specs() {
             assert!(spec.validate().is_ok(), "{}", spec.type_id);
-            for key in spec.text_keys() {
+            // Numbers, like the channels "1", "2", read the same in every language.
+            let has_words = |key| {
+                spec.english(key)
+                    .is_some_and(|label| label.chars().any(char::is_alphabetic))
+            };
+            for key in spec.text_keys().filter(|&key| has_words(key)) {
                 assert_ne!(
                     spec.label("ru", key),
                     spec.label("en", key),

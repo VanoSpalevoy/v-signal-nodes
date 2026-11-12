@@ -27,6 +27,62 @@ const SINC_LEN: usize = 256;
 /// below 1 is `SINC_LEN / r` long, so its cost per device frame stays below this.
 pub const MAX_SINC_LEN: usize = 2048;
 
+/// A sinc resampler from `from` to `to` samples per second for `channels` interleaved
+/// channels, giving [`CHUNK_FRAMES`] at a time. Downsampling gets a longer filter
+/// (see the module docs).
+pub(crate) fn sinc_resampler(
+    from: f32,
+    to: f32,
+    channels: usize,
+) -> Result<Async<f32>, DeviceError> {
+    let ratio = f64::from(to) / f64::from(from);
+    let sinc_len = ((SINC_LEN as f64 / ratio.min(1.0)).ceil() as usize).min(MAX_SINC_LEN);
+    let parameters = SincInterpolationParameters {
+        sinc_len,
+        f_cutoff: None,
+        oversampling_factor: 128,
+        interpolation: SincInterpolationType::Cubic,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    Async::new_sinc(
+        ratio,
+        1.0,
+        &parameters,
+        CHUNK_FRAMES,
+        channels,
+        FixedAsync::Output,
+    )
+    .map_err(|err| DeviceError::Resampling(err.to_string()))
+}
+
+/// Resamples one chunk from `input` (its first [`Resampler::input_frames_next`]
+/// frames) into `output`; returns the samples written, silence if resampling fails,
+/// which the buffer sizes of the callers rule out.
+pub(crate) fn resample_chunk(
+    resampler: &mut Async<f32>,
+    input: &[f32],
+    output: &mut [f32],
+    channels: usize,
+) -> usize {
+    let frames_in = resampler.input_frames_next();
+    let frames_out = resampler.output_frames_next();
+    let resampled = InterleavedSlice::new(&input[..frames_in * channels], channels, frames_in)
+        .ok()
+        .zip(InterleavedSlice::new_mut(output, channels, frames_out).ok())
+        .and_then(|(input, mut output)| {
+            resampler
+                .process_into_buffer(&input, &mut output, None)
+                .ok()
+        });
+    match resampled {
+        Some((_, frames)) if frames > 0 => frames * channels,
+        _ => {
+            output[..frames_out * channels].fill(0.0);
+            frames_out * channels
+        }
+    }
+}
+
 /// A [`Renderer`] at its own rate, resampled to a device's rate.
 pub struct Resampled {
     renderer: Renderer,
@@ -45,24 +101,7 @@ impl Resampled {
     /// channels per frame. Fails only if the rates are unusable.
     pub fn new(renderer: Renderer, device_rate: f32, channels: usize) -> Result<Self, DeviceError> {
         let channels = channels.max(1);
-        let ratio = f64::from(device_rate) / f64::from(renderer.sample_rate());
-        let sinc_len = ((SINC_LEN as f64 / ratio.min(1.0)).ceil() as usize).min(MAX_SINC_LEN);
-        let parameters = SincInterpolationParameters {
-            sinc_len,
-            f_cutoff: None,
-            oversampling_factor: 128,
-            interpolation: SincInterpolationType::Cubic,
-            window: WindowFunction::BlackmanHarris2,
-        };
-        let resampler = Async::new_sinc(
-            ratio,
-            1.0,
-            &parameters,
-            CHUNK_FRAMES,
-            channels,
-            FixedAsync::Output,
-        )
-        .map_err(|err| DeviceError::Resampling(err.to_string()))?;
+        let resampler = sinc_resampler(renderer.sample_rate(), device_rate, channels)?;
         Ok(Self {
             input: vec![0.0; resampler.input_frames_max() * channels],
             output: vec![0.0; resampler.output_frames_max() * channels],
@@ -90,29 +129,13 @@ impl Resampled {
         }
     }
 
-    /// Renders and resamples the next chunk into `output`. Silence if resampling
-    /// fails, which the buffer sizes rule out.
+    /// Renders and resamples the next chunk into `output`.
     fn next_chunk(&mut self) {
         let channels = self.channels;
         let frames_in = self.resampler.input_frames_next();
-        let frames_out = self.resampler.output_frames_next();
-        let input = &mut self.input[..frames_in * channels];
-        self.renderer.render(input, channels);
-        let resampled = InterleavedSlice::new(&*input, channels, frames_in)
-            .ok()
-            .zip(InterleavedSlice::new_mut(&mut self.output, channels, frames_out).ok())
-            .and_then(|(input, mut output)| {
-                self.resampler
-                    .process_into_buffer(&input, &mut output, None)
-                    .ok()
-            });
-        self.filled = match resampled {
-            Some((_, frames)) if frames > 0 => frames * channels,
-            _ => {
-                self.output[..frames_out * channels].fill(0.0);
-                frames_out * channels
-            }
-        };
+        self.renderer
+            .render(&mut self.input[..frames_in * channels], channels);
+        self.filled = resample_chunk(&mut self.resampler, &self.input, &mut self.output, channels);
         self.sent = 0;
     }
 }

@@ -8,12 +8,18 @@
 //! - **Sample rate** — the project's (`VSignalNodesApp::set_sample_rate`): common
 //!   rates in a list ([`SAMPLE_RATE_PRESETS`]), any other in kHz in the field next to
 //!   it, applied when the field is let go (each new rate restarts a real-time run).
+//! - **Output, Input** — the devices (`VSignalNodesApp::set_output_device`,
+//!   `set_input_device`): the system's default or one by name, looked up when the
+//!   list opens. A new one restarts a real-time run.
 //! - **Language** — switches the UI language; takes effect on the next frame.
 //!
 //! The toolbar wraps onto more lines when the window is narrow, which makes the
 //! panel taller and the canvas shorter.
 
+use std::sync::Arc;
+
 use eframe::egui;
+use v_signal_nodes_device::{DeviceError, Input, Output};
 
 use super::params::drag_speed;
 use super::{caption, panel_frame};
@@ -23,6 +29,8 @@ use crate::editor::{Language, Text, VSignalNodesApp};
 
 /// Sample rates offered in the list, in Hz.
 const SAMPLE_RATE_PRESETS: [u32; 5] = [44_100, 48_000, 96_000, 192_000, 384_000];
+/// Width of a closed device list; longer names are cut with an ellipsis.
+const DEVICE_LIST_WIDTH: f32 = 160.0;
 
 /// Shows the toolbar as a top panel and applies its actions to `app`.
 pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
@@ -49,6 +57,7 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
                     Command::RunRealtime,
                     Command::StopRealtime,
                     Command::RunAsync,
+                    Command::RecordToFile,
                 ] {
                     if ui.button(app.language.text(command.text())).clicked() {
                         app.execute(command);
@@ -69,6 +78,27 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
                 ui.add_space(4.0);
                 sample_rate_control(app, ui);
                 ui.add_space(8.0);
+                let output = app.execution.output_device().map(str::to_owned);
+                if let Some(chosen) = device_control(
+                    ui,
+                    app.language,
+                    Text::OutputDevice,
+                    output.as_deref(),
+                    Output::names,
+                ) {
+                    app.set_output_device(chosen);
+                }
+                let input = app.execution.input_device().map(str::to_owned);
+                if let Some(chosen) = device_control(
+                    ui,
+                    app.language,
+                    Text::InputDevice,
+                    input.as_deref(),
+                    Input::names,
+                ) {
+                    app.set_input_device(chosen);
+                }
+                ui.add_space(8.0);
                 ui.label(app.language.text(Text::Language));
                 egui::ComboBox::from_id_salt("language")
                     .selected_text(app.language.native_name())
@@ -83,6 +113,51 @@ pub(super) fn show(app: &mut VSignalNodesApp, ui: &mut egui::Ui) {
                     });
             });
         });
+}
+
+/// A device list labeled `label`: the system's default first, then every device
+/// `names` finds, `current` marked (`None`: the default). The devices are looked up
+/// when the list opens and kept in egui temp memory while it's open, since asking
+/// the system takes a while. Returns the device picked this frame, if any.
+fn device_control(
+    ui: &mut egui::Ui,
+    language: Language,
+    label: Text,
+    current: Option<&str>,
+    names: fn() -> Result<Vec<String>, DeviceError>,
+) -> Option<Option<String>> {
+    ui.label(language.text(label));
+    let default = language.text(Text::DefaultDevice);
+    let listed = ui.scope_id().with(("devices", language.text(label)));
+    let mut chosen = None;
+    let open = egui::ComboBox::from_id_salt(listed)
+        .selected_text(current.unwrap_or(default))
+        .width(DEVICE_LIST_WIDTH)
+        .truncate()
+        .show_ui(ui, |ui| {
+            let devices = ui
+                .data(|data| data.get_temp::<Arc<Vec<String>>>(listed))
+                .unwrap_or_else(|| {
+                    let devices = Arc::new(names().unwrap_or_default());
+                    ui.data_mut(|data| data.insert_temp(listed, Arc::clone(&devices)));
+                    devices
+                });
+            if ui.selectable_label(current.is_none(), default).clicked() {
+                chosen = Some(None);
+            }
+            for name in devices.iter() {
+                if ui.selectable_label(current == Some(name), name).clicked() {
+                    chosen = Some(Some(name.clone()));
+                }
+            }
+        })
+        .inner
+        .is_some();
+    if !open {
+        // Looked up again the next time it opens: devices come and go.
+        ui.data_mut(|data| data.remove::<Arc<Vec<String>>>(listed));
+    }
+    chosen
 }
 
 /// The sample rate list and field. The field's value while it's being dragged or

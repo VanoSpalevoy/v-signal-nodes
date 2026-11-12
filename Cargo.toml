@@ -30,6 +30,10 @@ rubato = { version = "5.0.1", default-features = false }
 rtrb = "0.4.1"
 # Only the macOS menu bar uses it; the default `gtk3` feature is Linux-only.
 muda = { version = "0.21.2", default-features = false }
+# The system's file dialogs (recording to a file). On Linux only through the XDG
+# desktop portal, no GTK: it loads the system's libdbus (AFL-2.1 OR GPL-2.0, used
+# under AFL) at run time with `dlopen`, nothing is linked.
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 v-signal-nodes-core = { path = "crates/core" }

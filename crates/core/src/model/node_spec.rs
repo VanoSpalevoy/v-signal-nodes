@@ -330,6 +330,7 @@ impl NodeSpec {
 
         let (has_inputs, has_outputs) = (!self.inputs.is_empty(), !self.outputs.is_empty());
         let fits_kind = match self.kind {
+            NodeKind::Input => has_outputs && !has_inputs,
             NodeKind::Generator => has_outputs,
             NodeKind::Processor => has_inputs && has_outputs,
             NodeKind::Output | NodeKind::Instrument => has_inputs,
